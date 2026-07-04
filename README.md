@@ -16,16 +16,16 @@ Many automation tools already know how to call a CLI such as `codex exec` with:
 
 This project lets those tools keep that simple external-command contract while the model/provider logic lives outside the host project.
 
-In other words: upstream projects only need a small custom model command hook. They do not need to vendor OpenAI-compatible provider clients or tool-loop code.
+In other words: upstream projects only need an external command seam, such as an existing executable override or a small custom model command hook. They do not need to vendor OpenAI-compatible provider clients or tool-loop code.
 
 ## Current recipes
 
 ```text
-recipes/clawsweeper-repair/
+recipes/clawsweeper-codex-bin/
 recipes/local-ops/
 ```
 
-`recipes/clawsweeper-repair` documents how to connect ClawSweeper repair/review steps to this adapter without adding provider runtime code to ClawSweeper.
+`recipes/clawsweeper-codex-bin` documents how to connect ClawSweeper repair/review steps through ClawSweeper's supported `CODEX_BIN` executable override, without adding provider runtime code to ClawSweeper.
 
 `recipes/local-ops` documents a generic local supervised-automation profile.
 
@@ -122,7 +122,7 @@ cat /tmp/adapter-result.json
 
 ## Connecting another tool or repository
 
-A host project should add the smallest possible external command hook, for example:
+A host project should use the smallest possible external command seam. Some hosts already provide an executable override such as `CODEX_BIN`; others may need a small model command hook. For a generic hook, for example:
 
 ```bash
 MODEL_COMMAND=/path/to/openai-compatible-tool-adapter/dist/bin/openai-compatible-tool-adapter.js
@@ -141,15 +141,15 @@ stdin prompt
 
 If the host already calls `codex exec`, the most compatible integration is usually a small wrapper script that translates host-specific environment names into `OPENAI_COMPATIBLE_ADAPTER_*` and then invokes this adapter.
 
-## ClawSweeper wrapper
+## ClawSweeper CODEX_BIN wrapper
 
 This repository includes:
 
 ```text
-bin/clawsweeper-repair-adapter.mjs
+bin/clawsweeper-codex-adapter.mjs
 ```
 
-That wrapper maps ClawSweeper environment names to the generic adapter contract:
+Use it as ClawSweeper's `CODEX_BIN`. The wrapper maps ClawSweeper environment names to the generic adapter contract:
 
 ```text
 CLAWSWEEPER_OPENAI_COMPATIBLE_BASE_URL      -> OPENAI_COMPATIBLE_ADAPTER_BASE_URL
@@ -168,7 +168,7 @@ CLAWSWEEPER_INVENTORY_TOKEN
 CLAWSWEEPER_DISPATCH_TOKEN
 ```
 
-See `recipes/clawsweeper-repair/` for details.
+See `recipes/clawsweeper-codex-bin/` for details.
 
 ## Tool surface
 

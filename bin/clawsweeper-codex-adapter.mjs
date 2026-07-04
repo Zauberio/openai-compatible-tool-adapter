@@ -43,7 +43,7 @@ if (result.error) {
   process.exit(1);
 }
 if (result.signal) {
-  console.error(`clawsweeper repair adapter terminated by ${result.signal}`);
+  console.error(`clawsweeper codex adapter terminated by ${result.signal}`);
   process.exit(1);
 }
 process.exit(result.status ?? 0);

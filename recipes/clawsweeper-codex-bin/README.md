@@ -1,23 +1,28 @@
-# Recipe: ClawSweeper repair
+# Recipe: ClawSweeper via CODEX_BIN
 
-This recipe connects ClawSweeper repair/edit/review flows to the generic OpenAI-compatible tool adapter.
+This recipe connects ClawSweeper repair/edit/review flows to the generic OpenAI-compatible tool adapter through ClawSweeper's existing `CODEX_BIN` executable override.
 
-The goal is to keep ClawSweeper mostly Codex-first and upstream-clean. ClawSweeper should only need a small external command hook, while provider/runtime details live here.
+The goal is to keep ClawSweeper upstream-clean and Codex-specific from the host project's point of view. ClawSweeper still calls a Codex-shaped command; this recipe supplies a `codex`-compatible executable that delegates provider/runtime work to this adapter.
 
 ## Files
 
 ```text
-bin/clawsweeper-repair-adapter.mjs
-recipes/clawsweeper-repair/adapter.example.env
+bin/clawsweeper-codex-adapter.mjs
+recipes/clawsweeper-codex-bin/adapter.example.env
 ```
 
 ## Host configuration
 
-Point ClawSweeper at the wrapper command:
+Point ClawSweeper's existing Codex executable override at the wrapper:
+
+```bash
+export CODEX_BIN=/path/to/openai-compatible-tool-adapter/bin/clawsweeper-codex-adapter.mjs
+```
+
+Keep ClawSweeper's normal Codex backend selected:
 
 ```bash
 export CLAWSWEEPER_MODEL_BACKEND=codex-cli
-export CLAWSWEEPER_MODEL_COMMAND=/path/to/openai-compatible-tool-adapter/bin/clawsweeper-repair-adapter.mjs
 ```
 
 Then configure the provider using ClawSweeper-flavoured environment names:
@@ -32,6 +37,12 @@ export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TOKENS=0
 ```
 
 `0` for max turns means unlimited turns inside the adapter. Use the host process timeout as the real budget.
+
+## Why CODEX_BIN
+
+ClawSweeper already supports `CODEX_BIN` as its executable substitution point. This recipe intentionally uses that supported seam instead of requiring ClawSweeper to add a second worker-command setting.
+
+From ClawSweeper's perspective, it still launches a Codex-compatible command with the same argv/stdin contract. Provider clients, model routing, tool-loop policy and result normalization remain in this adapter repository.
 
 ## GitHub tokens
 
@@ -51,7 +62,7 @@ CLAWSWEEPER_INVENTORY_TOKEN
 CLAWSWEEPER_DISPATCH_TOKEN
 ```
 
-Do not commit tokens into `adapter.example.env`, recipe files, or allowlist files.
+Do not commit tokens into `adapter.example.env`, recipe files, allowlist files, or shell history.
 
 ## Optional deterministic evidence pack
 
@@ -79,7 +90,7 @@ ClawSweeper can call the wrapper using the same shape it would use for `codex ex
 
 ```bash
 printf "$PROMPT" | \
-  /path/to/openai-compatible-tool-adapter/bin/clawsweeper-repair-adapter.mjs \
+  /path/to/openai-compatible-tool-adapter/bin/clawsweeper-codex-adapter.mjs \
     exec \
     --cd /tmp/clawsweeper-target/repo \
     --output-last-message /tmp/clawsweeper-summary.json \
@@ -107,3 +118,15 @@ validation_commands
 ```
 
 The adapter does not publish. ClawSweeper remains responsible for validation, committing, pushing, commenting, and all policy gates.
+
+## Validation smoke
+
+After building this package, a no-network wrapper reachability smoke should fail fast with a missing configuration error rather than a spawn error:
+
+```bash
+cd /path/to/openai-compatible-tool-adapter
+corepack pnpm run build
+node bin/clawsweeper-codex-adapter.mjs exec
+```
+
+For a real provider smoke, run through a supervised host/job runner with `CODEX_BIN` set to the wrapper and with provider secrets supplied by the runtime environment.

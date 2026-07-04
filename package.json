@@ -6,7 +6,7 @@
   "description": "Generic OpenAI-compatible tool adapter with recipe-based integrations.",
   "bin": {
     "openai-compatible-tool-adapter": "dist/bin/openai-compatible-tool-adapter.js",
-    "clawsweeper-repair-adapter": "bin/clawsweeper-repair-adapter.mjs"
+    "clawsweeper-codex-adapter": "bin/clawsweeper-codex-adapter.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
