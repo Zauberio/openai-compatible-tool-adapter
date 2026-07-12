@@ -1,9 +1,9 @@
 node_modules/
 dist/
+coverage/
 .env
+.env.*
+!.env.example
 *.log
-
-# Gallivanter local runtime state
-.gallivanter-runtime-adapter/
-gallivanter-runtime-adapter/
-.ops-backups/
+*.tgz
+.DS_Store

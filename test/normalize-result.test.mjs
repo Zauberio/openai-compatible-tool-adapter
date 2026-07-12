@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeCodexResult, normalizeCodexReview } from "../dist/core/normalize-result.js";
+import { normalizeCodexResult, normalizeCodexReview } from "../dist/recipes/clawsweeper/normalize-result.js";
 
-const prompt = `repo: openclaw/clawsweeper
-cluster_id: repair-pr-openclaw-clawsweeper-307
+const prompt = `repo: example/clawsweeper
+cluster_id: repair-pr-example-clawsweeper-307
 mode: autonomous
-https://github.com/openclaw/clawsweeper/pull/307
+https://github.com/example/clawsweeper/pull/307
 - check_failed: pnpm check failed because format:check reported oxfmt violations in pr-repair-intake.ts
 `;
 
@@ -25,7 +25,7 @@ test("normalizer keeps a concrete fix_artifact with validation as planned", () =
             "npx tsgo -p tsconfig.repair.json",
           ],
           repair_strategy: "repair_contributor_branch",
-          source_prs: ["https://github.com/openclaw/clawsweeper/pull/307"],
+          source_prs: ["https://github.com/example/clawsweeper/pull/307"],
           pr_title: "chore: format pr repair intake",
           pr_body: "Fix oxfmt format:check failure in pr-repair-intake.ts.",
         },
@@ -50,7 +50,7 @@ test("normalizer accepts build_fix_artifact alias", () => {
       JSON.stringify({
         result: "fix_needed",
         repair_strategy: "repair_contributor_branch",
-        source_prs: ["https://github.com/openclaw/clawsweeper/pull/307"],
+        source_prs: ["https://github.com/example/clawsweeper/pull/307"],
         build_fix_artifact: {
           summary: "Fix format:check by applying oxfmt to pr-repair-intake.ts.",
           likely_files: ["src/repair/pr-repair-intake.ts"],

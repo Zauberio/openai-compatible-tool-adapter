@@ -8,6 +8,7 @@ const root = path.resolve(here, "..");
 const adapter = path.join(root, "dist", "bin", "openai-compatible-tool-adapter.js");
 
 const env = { ...process.env };
+env.OPENAI_COMPATIBLE_ADAPTER_RECIPE ||= "clawsweeper";
 copy("CLAWSWEEPER_OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_ADAPTER_BASE_URL");
 copy("CLAWSWEEPER_OPENAI_COMPATIBLE_MODEL", "OPENAI_COMPATIBLE_ADAPTER_MODEL");
 copy("CLAWSWEEPER_OPENAI_COMPATIBLE_API_KEY_ENV", "OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV");

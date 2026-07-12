@@ -7,7 +7,7 @@ import { test } from "node:test";
 import {
   buildClawSweeperEvidencePack,
   buildClawSweeperEvidencePrelude,
-} from "../dist/core/clawsweeper-evidence-pack.js";
+} from "../dist/recipes/clawsweeper/evidence-pack.js";
 
 test("builds deterministic ClawSweeper evidence from prepared source PR ref", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "adapter-evidence-"));
@@ -26,13 +26,13 @@ test("builds deterministic ClawSweeper evidence from prepared source PR ref", ()
     git(dir, ["update-ref", "refs/remotes/clawsweeper/source-pr-123", source]);
     git(dir, ["checkout", "-q", "-B", "main", base]);
 
-    const prompt = `repo: openclaw/clawsweeper
-https://github.com/openclaw/clawsweeper/pull/123
+    const prompt = `repo: example/clawsweeper
+https://github.com/example/clawsweeper/pull/123
 ## Repair signals:
 - check_failed: format failed in \`src/file.ts\`
 `;
     const pack = buildClawSweeperEvidencePack(prompt, dir);
-    assert.equal(pack.repo, "openclaw/clawsweeper");
+    assert.equal(pack.repo, "example/clawsweeper");
     assert.equal(pack.source_prs[0].number, 123);
     assert.equal(pack.source_prs[0].local_ref, "refs/remotes/clawsweeper/source-pr-123");
     assert.deepEqual(pack.source_prs[0].changed_files, ["src/file.ts"]);
@@ -52,7 +52,7 @@ https://github.com/openclaw/clawsweeper/pull/123
 });
 
 test("evidence prelude is opt-in", () => {
-  const prelude = buildClawSweeperEvidencePrelude("repo: openclaw/clawsweeper", process.cwd());
+  const prelude = buildClawSweeperEvidencePrelude("repo: example/clawsweeper", process.cwd());
   assert.equal(prelude, "");
 });
 

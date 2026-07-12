@@ -2,15 +2,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import {
-  buildFinalizationPrompt,
-  isPrematureNeedsHuman,
-  looksLikeCodexResultCandidate,
-  normalizeCodexResult,
-  normalizeCodexReview,
-} from "../core/normalize-result.js";
-import { buildClawSweeperEvidencePrelude } from "../core/clawsweeper-evidence-pack.js";
+import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
+import { compileJsonSchema } from "../core/schema-validator.js";
+import { WorkspaceGuard } from "../core/workspace-guard.js";
 
 type Message = {
   role: string;
@@ -21,21 +16,35 @@ type Message = {
 type ToolCall = { id: string; function: { name: string; arguments?: string } };
 
 const rawArgs = process.argv.slice(2);
+if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
+  printHelp();
+  process.exit(0);
+}
+if (rawArgs.includes("--version") || rawArgs.includes("-V")) {
+  process.stdout.write(`${readPackageVersion()}\n`);
+  process.exit(0);
+}
 const args = normalizeCodexExecArgs(rawArgs);
 const cd = stringArg("--cd", process.cwd());
 const outputLastMessage = stringArg("--output-last-message", "");
 const outputSchema = stringArg("--output-schema", "");
 const outputSchemaAbs = outputSchema ? path.resolve(outputSchema) : "";
+if (outputSchemaAbs && !fs.existsSync(outputSchemaAbs)) {
+  throw new Error(`output schema not found: ${outputSchemaAbs}`);
+}
 const outputSchemaJson =
   outputSchemaAbs && fs.existsSync(outputSchemaAbs)
     ? JSON.parse(fs.readFileSync(outputSchemaAbs, "utf8"))
     : null;
+const outputSchemaValidator = outputSchemaJson ? compileJsonSchema(outputSchemaJson) : null;
 const cwd = path.resolve(cd);
 const baseUrl = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_BASE_URL").replace(/\/$/, "");
 const model = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_MODEL");
 const apiKeyEnv = process.env.OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV || "OPENAI_API_KEY";
 const apiKey = process.env[apiKeyEnv] || "";
-const maxTurns = numberEnvZeroMeansUnlimited("OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS");
+const apiKeyOptional = truthyEnv("OPENAI_COMPATIBLE_ADAPTER_API_KEY_OPTIONAL");
+const extraHeaders = jsonObjectEnv("OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON");
+const maxTurns = numberEnvZeroMeansUnlimited("OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS", 20);
 const maxRetries = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES", 3);
 const readLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT", 200000);
 const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS", 120000);
@@ -43,16 +52,17 @@ const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
-const evidencePackEnabled = truthyEnv("OPENAI_COMPATIBLE_ADAPTER_CLAWSWEEPER_EVIDENCE_PACK");
-const evidencePackMaxHunks = numberEnv("OPENAI_COMPATIBLE_ADAPTER_EVIDENCE_PACK_MAX_HUNKS", 6);
-const evidencePackMaxHunkBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_EVIDENCE_PACK_MAX_HUNK_BYTES", 12000);
+const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
+  env: process.env,
+});
 const allowed = String(process.env.OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES || "")
   .split(/[,:]/)
   .map((entry) => entry.trim())
   .filter(Boolean)
   .map((entry) => path.normalize(entry));
+const workspace = new WorkspaceGuard(cwd, allowed);
 
-if (!apiKey) throw new Error(`missing API key in ${apiKeyEnv}`);
+if (!apiKey && !apiKeyOptional) throw new Error(`missing API key in ${apiKeyEnv}`);
 
 const optionalToolArgs = new Set([
   "start",
@@ -123,37 +133,18 @@ const observedEvidence: string[] = [];
 
 async function main() {
   const rawPrompt = fs.readFileSync(0, "utf8");
-  const compactPrompt = compactRepairOnlyPrompt(rawPrompt);
-  const evidencePrelude = buildClawSweeperEvidencePrelude(rawPrompt, cwd, {
-    enabled: evidencePackEnabled,
-    maxHunks: evidencePackMaxHunks,
-    maxHunkBytes: evidencePackMaxHunkBytes,
-  });
-  if (evidencePrelude) process.stderr.write("[openai-compatible-tools] clawsweeper_evidence_pack=attached\n");
-  const prompt = evidencePrelude ? `${evidencePrelude}\n\n${compactPrompt}` : compactPrompt;
+  const prompt = recipe.preparePrompt(rawPrompt, cwd);
   const schemaInstruction = outputSchema
     ? `The final answer must be valid JSON matching the requested output schema path: ${outputSchema}. Do not wrap JSON in markdown.`
     : "For implementation tasks, summarize the changes made and validation run.";
+  let toolsExecuted = 0;
   const messages: Message[] = [
     {
       role: "system",
       content: [
-        "You are emulating `codex exec` for ClawSweeper.",
-        "Follow the stdin prompt exactly; do not invent a different workflow or role.",
-        "The target checkout, branch, and sandbox have already been prepared by ClawSweeper.",
-        "When the repair prompt asks for repository inspection with rg/sed/git, use the available tools: search_files, read_file_range, run_command, and git_diff.",
-        "If the repair prompt names a pull request or source_pr URL and read-only gh is available, inspect PR comments, reviews, review threads, and check status with gh before deciding what to edit.",
-        "Make the narrowest concrete edit that satisfies the fix artifact.",
-        "Prefer replace_in_file for localized edits. Use write_file only for intended whole-file replacement.",
-        "Do not push, open PRs, comment, label, merge, or inspect secrets.",
-        "Before returning, ensure git_diff reflects the intended change and summarize the validation you ran.",
-        "Use tools to inspect and edit files. Do not pretend to use tools.",
-        "Repair-only mode: the prompt already identifies the PR and concrete repair signals. Do not perform a broad repository audit.",
-        "Inspect only the source PR/comment/check evidence and the smallest relevant file ranges needed to fix that signal.",
-        "After a concrete issue is verified, edit immediately, run narrow validation, then stop and return the required JSON.",
-        "If you cannot verify and edit within a small number of tool calls, return a schema-valid blocked/needs_human result instead of continuing exploration.",
-        "For pr-repair-intake jobs, do not emit keep_canonical/merge/close verdicts. The deterministic intake already found a current repair signal.",
-        "For pr-repair-intake jobs, emit fix_needed plus build_fix_artifact when repair is possible; otherwise emit needs_human with exact blocker evidence.",
+        ...recipe.systemInstructions(
+          makeRecipeContext(rawPrompt, [], toolsExecuted, worktreeHasDiff()),
+        ),
         `Target repository cwd: ${cwd}.`,
         `Allowed write files: ${allowed.join(", ") || "all files under cwd"}.`,
         schemaInstruction,
@@ -163,7 +154,6 @@ async function main() {
   ];
   let finalContent = "";
   let exhausted = true;
-  let toolsExecuted = 0;
   for (let turn = 0; turn < maxTurns; turn += 1) {
     const data = await chat(messages, turn + 1, true);
     const msg = data.choices?.[0]?.message;
@@ -181,48 +171,21 @@ async function main() {
     if (calls.length === 0) {
       const validationErrors = validateFinalContent(finalContent);
       if (outputSchema && validationErrors.length > 0) {
-        if (outputSchema.endsWith("codex-review.schema.json")) {
-          const normalized = normalizeCodexReview(finalContent);
-          const normalizedErrors = validateFinalContent(normalized);
+        const candidate = recipe.normalizeCandidate?.(
+          finalContent,
+          makeRecipeContext(rawPrompt, messages, toolsExecuted, worktreeHasDiff()),
+        );
+        if (candidate) {
+          const normalizedErrors = validateFinalContent(candidate.content);
           if (normalizedErrors.length === 0) {
-            finalContent = normalized;
+            if (candidate.retryPrompt) {
+              messages.push({ role: "user", content: candidate.retryPrompt });
+              finalContent = "";
+              continue;
+            }
+            finalContent = candidate.content;
             exhausted = false;
             break;
-          }
-        }
-        if (outputSchema.endsWith("codex-result.schema.json")) {
-          if (looksLikeCodexResultCandidate(finalContent)) {
-            const normalized = normalizeCodexResult(finalContent, rawPrompt, worktreeHasDiff());
-            const normalizedErrors = validateFinalContent(normalized);
-            if (normalizedErrors.length === 0) {
-              if (isPrematureNeedsHuman(normalized, rawPrompt, toolsExecuted)) {
-                messages.push({
-                  role: "user",
-                  content: [
-                    "Do not return needs_human before inspecting the prepared source PR ref.",
-                    "The prompt includes Source PR refs. Use run_command/read_file_range/git diff/git show to inspect them now.",
-                    "Only return needs_human after tool evidence proves an exact blocker.",
-                  ].join("\n"),
-                });
-                finalContent = "";
-                continue;
-              }
-              finalContent = normalized;
-              exhausted = false;
-              break;
-            }
-          }
-          if (toolsExecuted > 0) {
-            messages.push({
-              role: "user",
-              content: [
-                "Your previous assistant message was neither a supported tool call nor valid final JSON.",
-                "Continue the repair run: either use a supported tool call, or return final JSON matching the requested schema.",
-                "Do not return prose-only analysis.",
-              ].join("\n"),
-            });
-            finalContent = "";
-            continue;
           }
         }
         messages.push({
@@ -250,32 +213,24 @@ async function main() {
     }
   }
   const diffExistsAtEnd = worktreeHasDiff();
-  if (exhausted && outputSchema && outputSchema.endsWith("codex-result.schema.json")) {
-    if (toolsExecuted > 0) {
-      process.stderr.write(
-        "[openai-compatible-tools] finalization_start reason=max_turns_after_tools\n",
-      );
-      const finalMessages: Message[] = [
-        {
-          role: "system",
-          content: [
-            "You are producing the final ClawSweeper repair result.",
-            "Tools are unavailable. Do not call tools. Do not emit DSML/tool_calls.",
-            "Return JSON only. No markdown. No prose outside JSON.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: buildFinalizationPrompt(rawPrompt, messages, diffExistsAtEnd, outputSchema),
-        },
-      ];
-      const data = await chat(finalMessages, maxTurns + 1, false);
-      const msg = data.choices?.[0]?.message;
-      if (!msg) throw new Error("missing final assistant message");
-      finalContent = String(msg.content ?? "");
-      if (finalContent) process.stdout.write(`assistant_finalization:\n${finalContent}\n`);
-    }
-    finalContent = normalizeCodexResultIfNeeded(finalContent, rawPrompt, diffExistsAtEnd);
+  const exhaustionContext = makeRecipeContext(
+    rawPrompt,
+    messages,
+    toolsExecuted,
+    diffExistsAtEnd,
+  );
+  const recipeFinalization = exhausted
+    ? recipe.buildExhaustionFinalization?.(exhaustionContext) ?? null
+    : null;
+  if (exhausted && recipeFinalization) {
+    process.stderr.write(
+      `[openai-compatible-tools] finalization_start recipe=${recipe.name} reason=max_turns_after_tools\n`,
+    );
+    const data = await chat(recipeFinalization, maxTurns + 1, false);
+    const msg = data.choices?.[0]?.message;
+    if (!msg) throw new Error("missing final assistant message");
+    finalContent = String(msg.content ?? "");
+    if (finalContent) process.stdout.write(`assistant_finalization:\n${finalContent}\n`);
     exhausted = false;
   } else if (exhausted && outputSchema) {
     messages.push({
@@ -300,16 +255,19 @@ async function main() {
       partial_summary: finalContent || null,
     });
   }
-  if (outputSchema && outputSchema.endsWith("codex-review.schema.json"))
-    finalContent = normalizeCodexReview(finalContent);
-  if (outputSchema && outputSchema.endsWith("codex-result.schema.json"))
-    finalContent = normalizeCodexResultIfNeeded(finalContent, rawPrompt, diffExistsAtEnd);
+  finalContent =
+    recipe.normalizeFinal?.(
+      finalContent,
+      makeRecipeContext(rawPrompt, messages, toolsExecuted, diffExistsAtEnd),
+    ) ?? finalContent;
   let finalValidationErrors = validateFinalContent(finalContent);
   if (
     outputSchema &&
     finalValidationErrors.length > 0 &&
     finalContent.trim() &&
-    !outputSchema.endsWith("codex-result.schema.json")
+    (recipe.allowSchemaRepair?.(
+      makeRecipeContext(rawPrompt, messages, toolsExecuted, diffExistsAtEnd),
+    ) ?? true)
   ) {
     process.stderr.write(
       "[openai-compatible-tools] schema_repair_start errors=" +
@@ -319,12 +277,15 @@ async function main() {
     const repairMessages: Message[] = [
       {
         role: "system",
-        content: [
-          "You are emulating `codex exec --output-schema` for ClawSweeper.",
-          "Repair the provided JSON so it satisfies the requested JSON schema.",
-          "Return only the corrected JSON object. Do not use markdown or explanatory prose.",
-          "Do not add properties that are not allowed by the schema.",
-        ].join("\n"),
+        content: (
+          recipe.schemaRepairInstructions?.(
+            makeRecipeContext(rawPrompt, messages, toolsExecuted, diffExistsAtEnd),
+          ) ?? [
+            "Repair the provided JSON so it satisfies the requested JSON schema.",
+            "Return only the corrected JSON object. Do not use markdown or explanatory prose.",
+            "Do not add properties that are not allowed by the schema.",
+          ]
+        ).join("\n"),
       },
       {
         role: "user",
@@ -352,18 +313,22 @@ async function main() {
         "\n",
     );
     finalDiffSummary();
-    if (!outputSchema.endsWith("codex-result.schema.json")) process.exit(2);
-    finalContent = normalizeCodexResultIfNeeded(finalContent, rawPrompt, diffExistsAtEnd);
-    finalValidationErrors = validateFinalContent(finalContent);
-    if (finalValidationErrors.length > 0) process.exit(2);
+    process.exit(2);
   }
   if (outputLastMessage) {
     fs.mkdirSync(path.dirname(path.resolve(outputLastMessage)), { recursive: true });
     fs.writeFileSync(outputLastMessage, normalizeFinalContent(finalContent));
   }
   finalDiffSummary();
-  if (exhausted && !diffExistsAtEnd && !outputSchema.endsWith("codex-result.schema.json"))
+  if (
+    exhausted &&
+    !diffExistsAtEnd &&
+    !recipe.allowExhaustedWithoutDiff?.(
+      makeRecipeContext(rawPrompt, messages, toolsExecuted, diffExistsAtEnd),
+    )
+  ) {
     process.exit(2);
+  }
 }
 
 async function chat(messages: Message[], turn: number, allowTools: boolean): Promise<any> {
@@ -389,9 +354,14 @@ async function chat(messages: Message[], turn: number, allowTools: boolean): Pro
     let res: Response;
     let text = "";
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...extraHeaders,
+      };
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
       res = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        headers,
         body,
         signal: controller.signal,
       });
@@ -402,7 +372,7 @@ async function chat(messages: Message[], turn: number, allowTools: boolean): Pro
         `[openai-compatible-tools] chat_error turn=${turn} attempt=${attempt}/${maxRetries} elapsed_ms=${elapsed} error=${truncate(error instanceof Error ? error.message : String(error), 300)}\n`,
       );
       if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        await sleep(retryDelayMs(null, attempt));
         continue;
       }
       throw new Error(
@@ -418,66 +388,48 @@ async function chat(messages: Message[], turn: number, allowTools: boolean): Pro
       `[openai-compatible-tools] chat_done turn=${turn} attempt=${attempt}/${maxRetries} status=${res.status} elapsed_ms=${elapsed} response_bytes=${Buffer.byteLength(text)}\n`,
     );
     if (!res.ok) {
-      if ([429, 502, 503, 504].includes(res.status) && attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      if ([408, 429, 500, 502, 503, 504].includes(res.status) && attempt < maxRetries) {
+        await sleep(retryDelayMs(res, attempt));
         continue;
       }
       throw new Error(`OpenAI-compatible backend HTTP ${res.status}: ${truncate(text, 1000)}`);
     }
-    return JSON.parse(text);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new Error(
+        `OpenAI-compatible backend returned invalid JSON: ${
+          error instanceof Error ? error.message : String(error)
+        }; body=${truncate(text, 1000)}`,
+      );
+    }
+    if (!parsed?.choices?.[0]?.message) {
+      throw new Error(
+        `OpenAI-compatible backend response is missing choices[0].message: ${truncate(text, 1000)}`,
+      );
+    }
+    return parsed;
   }
   throw new Error("OpenAI-compatible backend retry exhausted");
 }
 
-function compactRepairOnlyPrompt(prompt: string): string {
-  if (!prompt.includes("source: pr-repair-intake") && !prompt.includes("# Repair-only PR intake")) {
-    return prompt;
-  }
-  const jobStart = prompt.indexOf("## Job file");
-  const evidenceStart = prompt.indexOf("## Repair evidence pack");
-  const preflightStart = prompt.indexOf("## Cluster preflight artifact");
-  const jobSectionEnd = [evidenceStart, preflightStart].filter((index) => index >= 0).sort((a, b) => a - b)[0];
-  const jobSection =
-    jobStart >= 0
-      ? prompt.slice(jobStart, jobSectionEnd ?? undefined)
-      : prompt;
-  const evidencePack =
-    evidenceStart >= 0
-      ? prompt.slice(evidenceStart, preflightStart >= 0 ? preflightStart : evidenceStart + 36000)
-      : "";
-  const preflight = preflightStart >= 0 ? prompt.slice(preflightStart, preflightStart + 6000) : "";
-  const sourceRefsStart = prompt.indexOf("## Source PR refs");
-  const requiredOutputStart = prompt.indexOf("## Required final output");
-  const sourceRefs =
-    sourceRefsStart >= 0
-      ? prompt.slice(
-          sourceRefsStart,
-          requiredOutputStart >= 0 ? requiredOutputStart : sourceRefsStart + 4000,
-        )
-      : "";
-  return [
-    "# Compact repair-only ClawSweeper prompt",
-    "",
-    "This is a deterministic pr-repair-intake job. A current repair signal already exists.",
-    "Do not perform a normal review verdict. Do not return keep_canonical just because the PR is approved or clean.",
-    "Required outcome: produce a schema-valid repair result with fix_needed/build_fix_artifact, or needs_human/blocked with exact blocker evidence.",
-    "Focus on the repair evidence pack first: repair_signals, evidence_gates, likely_files, changed_files, and relevant_hunks.",
-    "If evidence_gates.source_pr_diff_read/actionable_signal_read/relevant_hunk_read are true, you may return final JSON immediately without exploratory tools.",
-    "Do not waste tool turns on git branch, git log, or generic status checks; those are not repair evidence.",
-    "If you use tools, inspect only the source diff or relevant file hunks named by the evidence pack, for example git diff <diff_ref> -- <likely_files>.",
-    "If a source PR branch needs repair, use repair_strategy=repair_contributor_branch and source_prs with the full PR URL.",
-    "Do not push, merge, close, comment, or label.",
-    "",
-    evidencePack.trim(),
-    "",
-    jobSection.trim(),
-    "",
-    sourceRefs.trim(),
-    "",
-    preflight.trim(),
-  ]
-    .filter(Boolean)
-    .join("\n");
+function makeRecipeContext(
+  rawPrompt: string,
+  messages: Message[],
+  toolsExecuted: number,
+  diffExists: boolean,
+): RecipeContext {
+  return {
+    rawPrompt,
+    cwd,
+    outputSchema,
+    allowedFiles: allowed,
+    toolsExecuted,
+    diffExists,
+    observedEvidence,
+    messages,
+  };
 }
 
 function commandFromArgs(parsed: Record<string, unknown>): string {
@@ -492,33 +444,6 @@ function commandFromArgs(parsed: Record<string, unknown>): string {
   return "";
 }
 
-
-function rewriteUnsupportedGhPrView(command: string): string | null {
-  if (!/\bgh\s+pr\s+view\b/.test(command)) return null;
-  if (!/--json\s+[^\n]*(reviews|reviewRequests|comments)/.test(command)) return null;
-  const number = command.match(/\bgh\s+pr\s+view\s+(\d+)\b/)?.[1];
-  const repo = command.match(/--repo\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/)?.[1];
-  if (!number) return null;
-  const repoSetup = repo
-    ? ""
-    : "REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^git@github.com:##; s#^https://github.com/##; s#\\.git$##'); if [ -z \"$REPO\" ]; then echo '{\"source\":\"gh_api_rest_rewrite\",\"error\":\"repo_inference_failed\"}'; exit 2; fi; BASE=\"repos/$REPO\"";
-  const base = repo ? shellQuote(`repos/${repo}`) : '"$BASE"';
-  const pr = shellQuote(number);
-  return [
-    repoSetup,
-    "echo '{\"source\":\"gh_api_rest_rewrite\",\"reason\":\"gh pr view review/comment fields use GraphQL fields that can require extra org scopes; using REST with the same GH_TOKEN\",\"review_comments\":'",
-    `gh api ${base}/pulls/${pr}/comments --jq '[.[] | {path,line,side,user:.user.login,body,html_url,created_at}]'`,
-    "echo ',\"reviews\":'",
-    `gh api ${base}/pulls/${pr}/reviews --jq '[.[] | {state,user:.user.login,body,html_url,submitted_at}]'`,
-    "echo ',\"issue_comments\":'",
-    `gh api ${base}/issues/${pr}/comments --jq '[.[] | {user:.user.login,body,html_url,created_at}]'`,
-    "echo '}'",
-  ].filter(Boolean).join(" && ");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
 
 function recordObservedEvidence(call: ToolCall, result: Message) {
   const name = call.function.name;
@@ -602,7 +527,7 @@ function executeTool(call: ToolCall): Message {
     if (call.function.name === "run_command") {
       let command = commandFromArgs(parsed);
       if (!command) return toolResult(call.id, { ok: false, error: "missing command" });
-      command = rewriteUnsupportedGhPrView(command) ?? command;
+      command = recipe.rewriteCommand?.(command) ?? command;
       const timeout = boundedCommandTimeout(parsed.timeoutMs, commandTimeoutMs);
       const result = spawnSync("bash", ["-lc", command], {
         cwd,
@@ -646,6 +571,7 @@ function executeTool(call: ToolCall): Message {
     if (call.function.name === "apply_patch") {
       const patch = String(parsed.patch || "");
       if (!patch.trim()) return toolResult(call.id, { ok: false, error: "missing patch" });
+      const paths = workspace.assertPatch(patch);
       const result = spawnSync("git", ["apply", "--whitespace=nowarn", "-"], {
         cwd,
         input: patch,
@@ -658,6 +584,7 @@ function executeTool(call: ToolCall): Message {
         status: result.status,
         stdout: truncate(result.stdout, commandOutputLimit),
         stderr: truncate(result.stderr, commandOutputLimit),
+        paths,
       });
     }
     if (call.function.name === "git_diff") {
@@ -738,17 +665,7 @@ function toolResult(id: string, obj: unknown): Message {
 }
 
 function assertPath(input: string, write: boolean) {
-  const raw = String(input || "");
-  const rawAbs = path.isAbsolute(raw) ? path.resolve(raw) : null;
-  const abs = rawAbs ?? path.resolve(cwd, path.normalize(raw.replace(/^\/+/, "")));
-  if (!abs.startsWith(cwd + path.sep) && abs !== cwd) throw new Error(`path outside cwd: ${input}`);
-  const rel = path.relative(cwd, abs) || ".";
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel))
-    throw new Error(`invalid repository path: ${input}`);
-  if (write && allowed.length > 0 && !allowed.includes(rel)) {
-    throw new Error(`write denied for ${rel}; allowed: ${allowed.join(", ")}`);
-  }
-  return { rel, abs };
+  return workspace.assertPath(input, write);
 }
 
 function normalizeFinalContent(content: string): string {
@@ -786,11 +703,6 @@ function extractJsonObject(value: string): string | null {
   return null;
 }
 
-function normalizeCodexResultIfNeeded(content: string, prompt: string, diffExists: boolean): string {
-  process.stderr.write("[openai-compatible-tools] codex_result_normalization=normalize_candidate\n");
-  return normalizeCodexResult(content, prompt, diffExists, observedEvidence);
-}
-
 function boundedCommandTimeout(value: unknown, fallbackMs: number): number {
   const requested = Number(value);
   if (!Number.isFinite(requested) || requested <= 0) return fallbackMs;
@@ -809,65 +721,7 @@ function validateFinalContent(content: string): string[] {
       `final output is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     ];
   }
-  if (!outputSchemaJson) return [];
-  return validateSchemaValue(outputSchemaJson, parsed, "$", []).slice(0, 40);
-}
-
-function validateSchemaValue(schema: any, value: unknown, at: string, errors: string[]): string[] {
-  if (!schema || typeof schema !== "object" || errors.length >= 40) return errors;
-  if (Array.isArray(schema.anyOf)) {
-    const alternatives = schema.anyOf.map((candidate: any) =>
-      validateSchemaValue(candidate, value, at, []),
-    );
-    if (alternatives.some((candidateErrors: string[]) => candidateErrors.length === 0))
-      return errors;
-    errors.push(`${at} does not match any allowed schema variant`);
-    return errors;
-  }
-  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
-  if (types.length > 0 && !types.some((type: string) => schemaTypeMatches(type, value))) {
-    errors.push(`${at} expected type ${types.join("|")}`);
-    return errors;
-  }
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    errors.push(
-      `${at} expected one of ${schema.enum.map((entry: unknown) => JSON.stringify(entry)).join(", ")}`,
-    );
-    return errors;
-  }
-  if (schema.type === "object" || (value && typeof value === "object" && !Array.isArray(value))) {
-    const obj = value as Record<string, unknown>;
-    for (const key of schema.required ?? []) {
-      if (!(key in obj)) errors.push(`${at}.${key} is required`);
-      if (errors.length >= 40) return errors;
-    }
-    const properties = schema.properties ?? {};
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(obj)) {
-        if (!(key in properties)) errors.push(`${at}.${key} is not allowed`);
-        if (errors.length >= 40) return errors;
-      }
-    }
-    for (const [key, childSchema] of Object.entries(properties)) {
-      if (key in obj) validateSchemaValue(childSchema, obj[key], `${at}.${key}`, errors);
-      if (errors.length >= 40) return errors;
-    }
-  }
-  if (Array.isArray(value) && schema.items) {
-    value.slice(0, 20).forEach((entry, index) => {
-      validateSchemaValue(schema.items, entry, `${at}[${index}]`, errors);
-    });
-  }
-  return errors;
-}
-
-function schemaTypeMatches(type: string, value: unknown): boolean {
-  if (type === "null") return value === null;
-  if (type === "array") return Array.isArray(value);
-  if (type === "object")
-    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-  if (type === "integer") return Number.isInteger(value);
-  return typeof value === type;
+  return outputSchemaValidator ? outputSchemaValidator(parsed) : [];
 }
 
 function worktreeHasDiff(): boolean {
@@ -915,12 +769,47 @@ function numberEnv(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function numberEnvZeroMeansUnlimited(name: string): number {
+function numberEnvZeroMeansUnlimited(name: string, fallback: number): number {
   const raw = process.env[name];
-  if (raw === undefined || raw.trim() === "") return Number.POSITIVE_INFINITY;
+  if (raw === undefined || raw.trim() === "") return fallback;
   const value = Number(raw);
   if (value === 0) return Number.POSITIVE_INFINITY;
-  return Number.isFinite(value) && value > 0 ? value : Number.POSITIVE_INFINITY;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a positive integer or 0 for unlimited`);
+  }
+  return value;
+}
+
+function jsonObjectEnv(name: string): Record<string, string> {
+  const raw = process.env[name]?.trim();
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${name} must contain a valid JSON object: ${String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${name} must contain a JSON object`);
+  }
+  return Object.fromEntries(
+    Object.entries(parsed).map(([key, value]) => [key, String(value)]),
+  );
+}
+
+function retryDelayMs(response: Response | null, attempt: number): number {
+  const retryAfter = response?.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30000);
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) return Math.max(0, Math.min(dateMs - Date.now(), 30000));
+  }
+  return Math.min(1000 * 2 ** Math.max(0, attempt - 1), 10000) + Math.floor(Math.random() * 250);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function truthyEnv(name: string): boolean {
@@ -941,6 +830,36 @@ function truncate(value: unknown, limit = 12000): string {
     : text;
 }
 
+
+function readPackageVersion(): string {
+  const packagePath = new URL("../../package.json", import.meta.url);
+  const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  return String(pkg.version || "0.0.0");
+}
+
+function printHelp(): void {
+  process.stdout.write(`openai-compatible-tool-adapter
+
+Usage:
+  openai-compatible-tool-adapter exec [options] -
+
+Options:
+  --cd <path>                    Target repository checkout
+  --output-last-message <path>   Write the final assistant message
+  --output-schema <path>         Validate final JSON against a schema
+  --json                         Codex-compatible accepted flag
+  --help, -h                     Show this help
+  --version, -V                  Show package version
+
+Required environment:
+  OPENAI_COMPATIBLE_ADAPTER_BASE_URL
+  OPENAI_COMPATIBLE_ADAPTER_MODEL
+  OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV (defaults to OPENAI_API_KEY)
+
+The API key may be omitted only when OPENAI_COMPATIBLE_ADAPTER_API_KEY_OPTIONAL=1.
+The default recipe is generic; wrappers may select another recipe.
+`);
+}
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.stack || error.message : String(error));

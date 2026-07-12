@@ -3,19 +3,59 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "Generic OpenAI-compatible tool adapter with recipe-based integrations.",
+  "description": "Codex-shaped local coding-agent CLI for OpenAI-compatible Chat Completions providers.",
   "bin": {
     "openai-compatible-tool-adapter": "dist/bin/openai-compatible-tool-adapter.js",
     "clawsweeper-codex-adapter": "bin/clawsweeper-codex-adapter.mjs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:pack": "node test/package-smoke.mjs",
+    "verify": "npm run check && npm run build && npm run test && npm run test:pack",
+    "prepack": "npm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ajv": "^8.20.0"
+  },
+  "files": [
+    "dist/",
+    "bin/*.mjs",
+    "recipes/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    ".env.example",
+    "examples/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jhacarreiro/openai-compatible-tool-adapter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jhacarreiro/openai-compatible-tool-adapter/issues"
+  },
+  "homepage": "https://github.com/Jhacarreiro/openai-compatible-tool-adapter#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.12.0",
+  "keywords": [
+    "openai-compatible",
+    "tool-calling",
+    "codex",
+    "agent",
+    "chat-completions",
+    "cli"
+  ]
 }

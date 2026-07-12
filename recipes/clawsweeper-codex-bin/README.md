@@ -1,55 +1,92 @@
-# Recipe: ClawSweeper via CODEX_BIN
+# ClawSweeper recipe
 
-This recipe connects ClawSweeper repair/edit/review flows to the generic OpenAI-compatible tool adapter through ClawSweeper's existing `CODEX_BIN` executable override.
+Use an OpenAI-compatible Chat Completions provider as the coding worker behind ClawSweeper's existing `CODEX_BIN` command override.
 
-The goal is to keep ClawSweeper upstream-clean and Codex-specific from the host project's point of view. ClawSweeper still calls a Codex-shaped command; this recipe supplies a `codex`-compatible executable that delegates provider/runtime work to this adapter.
+The wrapper keeps the command shape expected by ClawSweeper, maps recipe-specific environment variables to the generic adapter, and explicitly selects the `clawsweeper` recipe.
 
-## Files
+## Requirements
 
-```text
-bin/clawsweeper-codex-adapter.mjs
-recipes/clawsweeper-codex-bin/adapter.example.env
-```
+- A built or installed copy of OpenAI-Compatible Tool Adapter.
+- A ClawSweeper version that supports `CODEX_BIN`.
+- An OpenAI-compatible provider and tool-capable model.
+- GitHub credentials only when the repair job needs PR inspection.
 
-## Host configuration
+## Quick start
 
-Point ClawSweeper's existing Codex executable override at the wrapper:
+### 1. Build and expose the wrapper
 
-```bash
-export CODEX_BIN=/path/to/openai-compatible-tool-adapter/bin/clawsweeper-codex-adapter.mjs
-```
-
-Keep ClawSweeper's normal Codex backend selected:
+From the adapter checkout:
 
 ```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm run build
+npm link
+```
+
+Confirm both public commands are available:
+
+```bash
+openai-compatible-tool-adapter --version
+clawsweeper-codex-adapter --help
+```
+
+### 2. Configure ClawSweeper
+
+```bash
+export CODEX_BIN="$(command -v clawsweeper-codex-adapter)"
 export CLAWSWEEPER_MODEL_BACKEND=codex-cli
 ```
 
-Then configure the provider using ClawSweeper-flavoured environment names:
+### 3. Configure the provider
 
 ```bash
 export CLAWSWEEPER_OPENAI_COMPATIBLE_BASE_URL="https://api.example.com/v1"
 export CLAWSWEEPER_OPENAI_COMPATIBLE_MODEL="provider/model"
 export CLAWSWEEPER_OPENAI_COMPATIBLE_API_KEY_ENV="PROVIDER_API_KEY"
-export PROVIDER_API_KEY="...real secret..."
-export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TURNS=0
-export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TOKENS=0
+export PROVIDER_API_KEY="replace-with-your-secret"
 ```
 
-`0` for max turns means unlimited turns inside the adapter. Use the host process timeout as the real budget.
-
-## Why CODEX_BIN
-
-ClawSweeper already supports `CODEX_BIN` as its executable substitution point. This recipe intentionally uses that supported seam instead of requiring ClawSweeper to add a second worker-command setting.
-
-From ClawSweeper's perspective, it still launches a Codex-compatible command with the same argv/stdin contract. Provider clients, model routing, tool-loop policy and result normalization remain in this adapter repository.
-
-## GitHub tokens
-
-For repair flows that inspect PRs, provide a normal GitHub token in the process environment:
+Safe starting limits:
 
 ```bash
-export GH_TOKEN="..."
+export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TURNS=20
+export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TOKENS=0
+export CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_RETRIES=3
+```
+
+Set max turns to `0` only when the caller enforces an outer wall-clock timeout.
+
+An example environment file is available at [adapter.example.env](./adapter.example.env).
+
+## What the wrapper maps
+
+| ClawSweeper variable | Adapter variable |
+|---|---|
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_BASE_URL` | `OPENAI_COMPATIBLE_ADAPTER_BASE_URL` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_MODEL` | `OPENAI_COMPATIBLE_ADAPTER_MODEL` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_API_KEY_ENV` | `OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TURNS` | `OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TOKENS` | `OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_RETRIES` | `OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_READ_LIMIT` | `OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_COMMAND_TIMEOUT_MS` | `OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_MS` | `OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_COMMAND_OUTPUT_LIMIT` | `OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_DIFF_OUTPUT_LIMIT` | `OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT` |
+| `CLAWSWEEPER_OPENAI_COMPATIBLE_ALLOWED_FILES` | `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` |
+
+The wrapper also sets:
+
+```bash
+OPENAI_COMPATIBLE_ADAPTER_RECIPE=clawsweeper
+```
+
+## GitHub access
+
+Repair jobs that inspect pull requests may need a normal GitHub token:
+
+```bash
+export GH_TOKEN="replace-with-a-scoped-token"
 export GITHUB_TOKEN="$GH_TOKEN"
 ```
 
@@ -62,11 +99,11 @@ CLAWSWEEPER_INVENTORY_TOKEN
 CLAWSWEEPER_DISPATCH_TOKEN
 ```
 
-Do not commit tokens into `adapter.example.env`, recipe files, allowlist files, or shell history.
+`run_command` inherits these values because PR inspection may need `gh`. Use narrowly scoped credentials and do not put tokens in recipe files, command arguments or shell history.
 
 ## Optional deterministic evidence pack
 
-The wrapper can ask the adapter to prepend a provider-neutral evidence block to the model prompt:
+Enable the ClawSweeper evidence prelude:
 
 ```bash
 export CLAWSWEEPER_REPAIR_EVIDENCE_PACK=1
@@ -74,59 +111,71 @@ export CLAWSWEEPER_REPAIR_EVIDENCE_PACK_MAX_HUNKS=6
 export CLAWSWEEPER_REPAIR_EVIDENCE_PACK_MAX_HUNK_BYTES=12000
 ```
 
-When enabled, the adapter reads only the prepared checkout and refs already fetched by ClawSweeper, especially refs shaped like:
+The recipe reads the prepared checkout and available source-PR refs, then adds deterministic context such as:
 
-```text
-refs/remotes/clawsweeper/source-pr-<number>
-```
+- source PR refs;
+- changed files and diff stat;
+- relevant hunks;
+- prompt repair signals;
+- likely files;
+- validation hints.
 
-It emits deterministic JSON with source PR refs, changed files, diff stat, relevant hunks, prompt repair signals, likely files and validation hints. This is evidence for the model, not a publish decision. ClawSweeper still owns validation, committing, pushing, commenting and policy gates.
+This evidence helps the model make a focused repair. It does not publish, push, merge, comment or label anything.
 
-The evidence pack is intentionally provider-neutral. It does not add provider clients, model routing, PR comments, labels, pushes, or GitHub mutations to ClawSweeper.
+## Expected command shape
 
-## Expected host command shape
-
-ClawSweeper can call the wrapper using the same shape it would use for `codex exec`:
+ClawSweeper may invoke the wrapper with the same shape used for `codex exec`:
 
 ```bash
-printf "$PROMPT" | \
-  /path/to/openai-compatible-tool-adapter/bin/clawsweeper-codex-adapter.mjs \
-    exec \
-    --cd /tmp/clawsweeper-target/repo \
-    --output-last-message /tmp/clawsweeper-summary.json \
-    --output-schema /path/to/schema/repair/codex-result.schema.json \
+printf '%s\n' "$PROMPT" | \
+  clawsweeper-codex-adapter exec \
+    --cd /tmp/repair-checkout \
+    --output-last-message /tmp/repair-result.json \
+    --output-schema /path/to/codex-result.schema.json \
     --json -
 ```
 
-The wrapper maps `CLAWSWEEPER_OPENAI_COMPATIBLE_*` to `OPENAI_COMPATIBLE_ADAPTER_*` and then calls the generic adapter.
+The recipe handles ClawSweeper-specific prompt compaction, evidence preparation, finalization and result normalization. Provider access and repository tools remain in the generic adapter core.
 
-## Recipe input expectations
+## Responsibility split
 
-The prompt/job should be job-scoped and include only what the repair worker needs:
+The adapter may:
 
-```text
-task: repair_edit or review_fix
-target_dir: temporary checkout
-fix_artifact.likely_files
-fix_artifact.validation_commands
-repair_contract.must_touch
-repair_contract.must_not_touch
-repair_contract.must_prove
-allowed_files
-allowed_pr_refs
-validation_commands
-```
+- inspect the prepared checkout;
+- inspect already available PR refs;
+- edit allowed files;
+- run validation commands;
+- return a schema-valid repair result.
 
-The adapter does not publish. ClawSweeper remains responsible for validation, committing, pushing, commenting, and all policy gates.
+ClawSweeper remains responsible for:
 
-## Validation smoke
+- creating and selecting the checkout;
+- deciding allowed files and refs;
+- enforcing job timeout and sandbox policy;
+- deterministic validation gates;
+- commit, push, comment, merge and other publication actions.
 
-After building this package, a no-network wrapper reachability smoke should fail fast with a missing configuration error rather than a spawn error:
+## Smoke test
+
+A no-provider reachability check:
 
 ```bash
-cd /path/to/openai-compatible-tool-adapter
-corepack pnpm run build
-node bin/clawsweeper-codex-adapter.mjs exec
+clawsweeper-codex-adapter --help
 ```
 
-For a real provider smoke, run through a supervised host/job runner with `CODEX_BIN` set to the wrapper and with provider secrets supplied by the runtime environment.
+A real smoke should use a disposable checkout and a read-only or narrowly scoped repair task. After the run, inspect:
+
+```bash
+git status --short
+git diff --check
+```
+
+## Troubleshooting
+
+- **Wrapper not found** — run `npm link` or point `CODEX_BIN` to `bin/clawsweeper-codex-adapter.mjs`.
+- **Missing provider environment** — verify the three required `CLAWSWEEPER_OPENAI_COMPATIBLE_*` values.
+- **GitHub 401/403** — confirm a scoped token is present in the same process environment.
+- **No repair evidence** — enable the evidence pack and confirm the prepared checkout contains the expected refs.
+- **Turn budget exhausted** — narrow the job or increase `CLAWSWEEPER_OPENAI_COMPATIBLE_MAX_TURNS`.
+
+For general provider and filesystem diagnostics, see [../../docs/troubleshooting.md](../../docs/troubleshooting.md).

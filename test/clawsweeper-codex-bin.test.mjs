@@ -18,7 +18,7 @@ test("ClawSweeper recipe is documented for CODEX_BIN, not MODEL_COMMAND", () => 
 
 test("ClawSweeper example env uses the public CODEX_BIN wrapper", () => {
   const text = readFileSync(recipeEnv, "utf8");
-  assert.match(text, /CODEX_BIN=.*clawsweeper-codex-adapter\.mjs/);
+  assert.match(text, /CODEX_BIN=(?:clawsweeper-codex-adapter|.*clawsweeper-codex-adapter\.mjs)/);
   assert.match(text, /CLAWSWEEPER_OPENAI_COMPATIBLE_BASE_URL=https:\/\/api\.example\.com\/v1/);
   assert.doesNotMatch(text, /CLAWSWEEPER_MODEL_COMMAND/);
 });
