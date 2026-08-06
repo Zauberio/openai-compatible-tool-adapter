@@ -197,6 +197,8 @@ function addFileMentions(out: string[], value: string): void {
     const cleaned = part.trim().replace(/^@/, "").replace(/^\/+/, "").replace(/[).:,;]+$/, "");
     if (!cleaned || cleaned.includes("http") || cleaned.startsWith("github.com/") || cleaned.startsWith("www.")) continue;
     if (!cleaned.includes("/")) continue;
+    // Date-like tokens (e.g. 12/03/2026) are not file mentions.
+    if (cleaned.split("/").every((segment) => /^\d+$/.test(segment))) continue;
     if (/^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_.@-]+$/.test(cleaned) && !cleaned.includes(".")) continue;
     out.push(cleaned);
   }
