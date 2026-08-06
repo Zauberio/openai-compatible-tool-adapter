@@ -58,6 +58,7 @@ const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
 const maxWriteBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES", 2 * 1024 * 1024);
+const maxPatchBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES", 2 * 1024 * 1024);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
@@ -533,13 +534,22 @@ function executeTool(call: ToolCall): Message {
       const after = replaceAll
         ? before.split(search).join(replacement)
         : before.replace(search, replacement);
+      const afterBytes = Buffer.byteLength(after);
+      if (afterBytes > maxWriteBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `replacement result exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES (${maxWriteBytes})`,
+          bytes: afterBytes,
+        });
+      }
       fs.writeFileSync(abs, after);
       return toolResult(call.id, {
         ok: true,
         path: rel,
         occurrences,
         replaceAll,
-        bytes: Buffer.byteLength(after),
+        bytes: afterBytes,
       });
     }
     if (call.function.name === "run_command") {
@@ -589,6 +599,14 @@ function executeTool(call: ToolCall): Message {
     if (call.function.name === "apply_patch") {
       const patch = String(parsed.patch || "");
       if (!patch.trim()) return toolResult(call.id, { ok: false, error: "missing patch" });
+      const patchBytes = Buffer.byteLength(patch);
+      if (patchBytes > maxPatchBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          error: `patch exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES (${maxPatchBytes})`,
+          bytes: patchBytes,
+        });
+      }
       const paths = workspace.assertPatch(patch);
       const result = spawnSync("git", ["apply", "--whitespace=nowarn", "-"], {
         cwd,
