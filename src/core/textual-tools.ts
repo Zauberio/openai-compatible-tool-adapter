@@ -90,7 +90,7 @@ export function dsmlToolCalls(content: string, allowedTools: readonly string[]):
     while ((param = paramRe.exec(body))) {
       const key = param[1] || "";
       const raw = (param[2] || "").trim();
-      if (key) args[key] = /^-?\d+$/.test(raw) ? Number(raw) : raw;
+      if (key) args[key] = raw === "true" ? true : raw === "false" ? false : /^-?\d+$/.test(raw) ? Number(raw) : raw;
     }
     const normalized = normalizePseudoToolCall({ type: name, ...args }, out.length, allowedTools);
     if (normalized) out.push(normalized);

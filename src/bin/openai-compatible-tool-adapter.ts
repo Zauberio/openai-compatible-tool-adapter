@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
 import { compileJsonSchema } from "../core/schema-validator.js";
@@ -205,7 +205,7 @@ async function main() {
     }
     for (const call of calls) {
       process.stdout.write(`tool_call: ${call.function.name} ${call.function.arguments || "{}"}\n`);
-      const result = executeTool(call);
+      const result = await executeTool(call);
       toolsExecuted += 1;
       recordObservedEvidence(call, result);
       process.stdout.write(`tool_result: ${truncate(result.content, 2000)}\n`);
@@ -465,7 +465,72 @@ function recordObservedEvidence(call: ToolCall, result: Message) {
   if (text && !observedEvidence.includes(text)) observedEvidence.push(text.slice(0, 500));
 }
 
-function executeTool(call: ToolCall): Message {
+function runCommand(command: string, cwd: string, timeout: number): Promise<{
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      detached: true, // own process group so the whole tree can be terminated
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const maxBuffer = 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const finish = (value: {
+      status: number | null;
+      signal: NodeJS.Signals | null;
+      timedOut: boolean;
+      stdout: string;
+      stderr: string;
+      error?: string;
+    }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // process group already gone
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (stdout.length < maxBuffer) stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < maxBuffer) stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      finish({ status: null, signal: null, timedOut, stdout, stderr, error: String(error.message || error) });
+    });
+    child.on("close", (code, signal) => {
+      // Reap any survivors of the process group (bash -lc children).
+      killGroup("SIGKILL");
+      finish({ status: code, signal, timedOut, stdout, stderr });
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup("SIGTERM");
+      // The group may not die on TERM; a second TERM is sent on close via SIGKILL reaping.
+    }, timeout);
+  });
+}
+
+async function executeTool(call: ToolCall): Promise<Message> {
   let parsed: any = {};
   try {
     parsed = JSON.parse(call.function.arguments || "{}");
@@ -529,16 +594,13 @@ function executeTool(call: ToolCall): Message {
       if (!command) return toolResult(call.id, { ok: false, error: "missing command" });
       command = recipe.rewriteCommand?.(command) ?? command;
       const timeout = boundedCommandTimeout(parsed.timeoutMs, commandTimeoutMs);
-      const result = spawnSync("bash", ["-lc", command], {
-        cwd,
-        encoding: "utf8",
-        timeout,
-        maxBuffer: 1024 * 1024,
-      });
+      const result = await runCommand(command, cwd, timeout);
+      if (result.error) return toolResult(call.id, { ok: false, error: result.error });
       return toolResult(call.id, {
         ok: result.status === 0,
         status: result.status,
         signal: result.signal,
+        timedOut: result.timedOut,
         stdout: truncate(result.stdout, commandOutputLimit),
         stderr: truncate(result.stderr, commandOutputLimit),
       });
@@ -622,12 +684,44 @@ function lineRange(parsed: Record<string, unknown>): { start: number; end: numbe
 
 function defaultReadLineEnd(abs: string): number {
   const maxLines = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LINES", 1000);
-  const lineCount = fs.readFileSync(abs, "utf8").split(/\n/).length;
-  return Math.min(lineCount, maxLines);
+  const { lines } = readLinesBounded(abs, 1, maxLines);
+  return Math.min(lines.length, maxLines);
+}
+
+function readLinesBounded(abs: string, start: number, end: number, maxBytes = 4 * 1024 * 1024): {
+  lines: string[];
+  totalLines: number;
+  scanTruncated: boolean;
+} {
+  const fd = fs.openSync(abs, "r");
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size > maxBytes) {
+      // Avoid loading huge files into memory: read a bounded head window.
+      // The window must cover the requested range, otherwise the caller reports an error.
+      const buffer = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+      const content = buffer.toString("utf8", 0, bytesRead);
+      const lines = content.split("\n");
+      return { lines, totalLines: lines.length, scanTruncated: true };
+    }
+    const content = fs.readFileSync(abs, "utf8");
+    const lines = content.split("\n");
+    return { lines, totalLines: lines.length, scanTruncated: false };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function readFileRange(id: string, rel: string, abs: string, start: number, end: number): Message {
-  const lines = fs.readFileSync(abs, "utf8").split(/\n/);
+  const { lines, totalLines, scanTruncated } = readLinesBounded(abs, start, end);
+  if (scanTruncated && end > lines.length) {
+    return toolResult(id, {
+      ok: false,
+      path: rel,
+      error: `file is too large to read the requested range (${end} > ${lines.length} lines in the readable window); use a smaller end line or read_file with a smaller range`,
+    });
+  }
   const boundedEnd = Math.min(Math.max(start, end), lines.length);
   const content = lines
     .slice(start - 1, boundedEnd)
@@ -638,9 +732,9 @@ function readFileRange(id: string, rel: string, abs: string, start: number, end:
     path: rel,
     start,
     end: boundedEnd,
-    total_lines: lines.length,
+    total_lines: scanTruncated ? null : totalLines,
     truncated_before: start > 1,
-    truncated_after: boundedEnd < lines.length,
+    truncated_after: boundedEnd < totalLines,
     content: truncate(content, readLimit),
   });
 }
