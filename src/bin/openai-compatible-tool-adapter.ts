@@ -533,7 +533,14 @@ function executeTool(call: ToolCall): Message {
         cwd,
         encoding: "utf8",
         timeout,
-        maxBuffer: 1024 * 1024,
+        // Raw read cap must exceed COMMAND_OUTPUT_LIMIT (default 200KB):
+        // a smaller cap KILLS the command mid-run (SIGTERM/ENOBUFS) when its
+        // output exceeds it, and the tool then reports ok:false even though
+        // the command only died because of the capture buffer. 16MB keeps
+        // realistic builds/tests alive; the returned text is still truncated
+        // by commandOutputLimit below. ENOBUFS beyond 16MB stays ok:false -
+        // the command genuinely did not complete.
+        maxBuffer: Math.max(16 * 1024 * 1024, commandOutputLimit + 1024 * 1024),
       });
       return toolResult(call.id, {
         ok: result.status === 0,
