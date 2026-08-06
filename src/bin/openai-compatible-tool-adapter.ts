@@ -660,12 +660,28 @@ async function executeTool(call: ToolCall): Promise<Message> {
       });
     }
     if (call.function.name === "git_diff") {
-      const status = spawnSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
+      const gitTimeout = Math.min(commandTimeoutMs, 30000);
+      const status = spawnSync("git", ["status", "--short"], {
+        cwd,
+        encoding: "utf8",
+        timeout: gitTimeout,
+        maxBuffer: 1024 * 1024,
+      });
       const diff = spawnSync("git", ["diff", "--", "."], {
         cwd,
         encoding: "utf8",
+        timeout: gitTimeout,
         maxBuffer: 2 * 1024 * 1024,
       });
+      if (status.error || diff.error) {
+        const err = status.error || diff.error;
+        const timedOut = Boolean(err && (err as NodeJS.ErrnoException).code === "ETIMEDOUT");
+        return toolResult(call.id, {
+          ok: false,
+          error: timedOut ? "git_diff timed out" : String(err),
+          timedOut,
+        });
+      }
       return toolResult(call.id, {
         ok: true,
         status: status.stdout,
