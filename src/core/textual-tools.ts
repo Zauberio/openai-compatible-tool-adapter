@@ -36,7 +36,22 @@ function extractJsonObject(value: string): string | null {
 }
 
 export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly string[]): ToolCall[] {
-  return calls.map((call, index) => normalizeToolCall(call, index, allowedTools)).filter(Boolean) as ToolCall[];
+  const seen = new Set<string>();
+  const out: ToolCall[] = [];
+  for (let index = 0; index < calls.length; index += 1) {
+    const normalized = normalizeToolCall(calls[index], index, allowedTools);
+    if (!normalized) continue;
+    // A single assistant message can carry the same call twice: once as a
+    // native tool_call and once as a JSON/DSML block in the content (the
+    // concat in the bin feeds both channels in). Executing both would run
+    // side-effecting tools twice. Dedupe by (name, normalized arguments),
+    // keeping the FIRST occurrence so native calls win over pseudo ones.
+    const key = `${normalized.function.name}\u0000${normalized.function.arguments}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
 }
 
 function normalizeToolCall(call: ToolCall, index: number, allowedTools: readonly string[]): ToolCall | null {
