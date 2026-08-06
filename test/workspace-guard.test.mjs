@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,6 +31,20 @@ test("accepts a valid directory as the workspace root", () => {
     assert.equal(guard.assertPath("ok.txt", false).rel, "ok.txt");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepts a symlink-to-directory as the workspace root", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-root-"));
+  const target = mkdtempSync(path.join(tmpdir(), "adapter-target-"));
+  try {
+    const link = path.join(root, "link");
+    symlinkSync(target, link, "dir");
+    const guard = new WorkspaceGuard(link);
+    assert.ok(guard.cwdReal.startsWith(realpathSync(target)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
   }
 });
 
