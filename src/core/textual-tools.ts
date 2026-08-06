@@ -36,6 +36,9 @@ function extractJsonObject(value: string): string | null {
 }
 
 export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly string[]): ToolCall[] {
+  // Defensive contract guard: the function is exported and callers filter
+  // through Array.isArray, but a non-array input must never crash.
+  if (!Array.isArray(calls)) return [];
   return calls.map((call, index) => normalizeToolCall(call, index, allowedTools)).filter(Boolean) as ToolCall[];
 }
 
