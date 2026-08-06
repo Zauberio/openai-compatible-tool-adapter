@@ -552,19 +552,24 @@ function executeTool(call: ToolCall): Message {
         cwd,
         encoding: "utf8",
         timeout: Math.min(commandTimeoutMs, 30000),
-        maxBuffer: 1024 * 1024,
+        // Raw read cap must comfortably exceed the maxResults window (200 lines):
+        // a large tree can legitimately produce many MB of matches before slicing.
+        maxBuffer: 16 * 1024 * 1024,
       });
+      const enobufs = (result.error as NodeJS.ErrnoException | null)?.code === "ENOBUFS";
       const lines = String(result.stdout || "")
         .split(/\n/)
         .filter(Boolean)
         .slice(0, maxResults);
       return toolResult(call.id, {
-        ok: result.status === 0 || result.status === 1,
+        // ENOBUFS with a partial match set is a truncated success, not a failure:
+        // the grep died on the raw buffer, but the capped match list is still valid.
+        ok: result.status === 0 || result.status === 1 || (enobufs && lines.length > 0),
         status: result.status,
         pattern,
         path: relPath,
         matches: lines,
-        truncated: lines.length >= maxResults,
+        truncated: lines.length >= maxResults || enobufs,
         stderr: truncate(result.stderr, Math.min(commandOutputLimit, 2000)),
       });
     }
@@ -592,7 +597,10 @@ function executeTool(call: ToolCall): Message {
       const diff = spawnSync("git", ["diff", "--", "."], {
         cwd,
         encoding: "utf8",
-        maxBuffer: 2 * 1024 * 1024,
+        // Raw read cap must exceed DIFF_OUTPUT_LIMIT (default 200KB): otherwise
+        // large diffs hit ENOBUFS and the tool silently returns a partial diff
+        // (or errors) instead of the truncated text the limit promises.
+        maxBuffer: Math.max(16 * 1024 * 1024, diffOutputLimit + 1024 * 1024),
       });
       return toolResult(call.id, {
         ok: true,
