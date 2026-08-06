@@ -28,3 +28,16 @@ test("filters disallowed tools", () => {
   );
   assert.equal(out.length, 0);
 });
+
+test("skips null/undefined holes in tool_calls without crashing", () => {
+  const valid = {
+    id: "ok",
+    type: "function",
+    function: { name: "run_command", arguments: JSON.stringify({ command: "true" }) },
+  };
+  assert.deepEqual(normalizeToolCalls([null], ALLOWED), []);
+  assert.deepEqual(normalizeToolCalls([undefined], ALLOWED), []);
+  const mixed = normalizeToolCalls([null, valid, undefined, 42, "x"], ALLOWED);
+  assert.equal(mixed.length, 1);
+  assert.equal(mixed[0].function.name, "run_command");
+});

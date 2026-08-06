@@ -43,6 +43,9 @@ export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly str
 }
 
 function normalizeToolCall(call: ToolCall, index: number, allowedTools: readonly string[]): ToolCall | null {
+  // Providers have been observed to put null/undefined holes in tool_calls arrays.
+  // Optional chaining on `.function` does not protect when `call` itself is nullish.
+  if (!call || typeof call !== "object") return null;
   const name = call.function?.name || "";
   if (!allowedTools.includes(name)) return null;
   let rawArgs: Record<string, unknown> = {};
