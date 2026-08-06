@@ -32,10 +32,17 @@ const outputSchemaAbs = outputSchema ? path.resolve(outputSchema) : "";
 if (outputSchemaAbs && !fs.existsSync(outputSchemaAbs)) {
   throw new Error(`output schema not found: ${outputSchemaAbs}`);
 }
-const outputSchemaJson =
-  outputSchemaAbs && fs.existsSync(outputSchemaAbs)
-    ? JSON.parse(fs.readFileSync(outputSchemaAbs, "utf8"))
-    : null;
+const maxSchemaBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES", 256 * 1024);
+const outputSchemaJson = (() => {
+  if (!outputSchemaAbs || !fs.existsSync(outputSchemaAbs)) return null;
+  const st = fs.statSync(outputSchemaAbs);
+  if (st.size > maxSchemaBytes) {
+    throw new Error(
+      `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
+    );
+  }
+  return JSON.parse(fs.readFileSync(outputSchemaAbs, "utf8"));
+})();
 const outputSchemaValidator = outputSchemaJson ? compileJsonSchema(outputSchemaJson) : null;
 const cwd = path.resolve(cd);
 const baseUrl = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_BASE_URL").replace(/\/$/, "");
@@ -50,6 +57,7 @@ const readLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT", 200000);
 const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS", 120000);
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
+const maxWriteBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES", 2 * 1024 * 1024);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
@@ -487,12 +495,22 @@ function executeTool(call: ToolCall): Message {
     }
     if (call.function.name === "write_file") {
       const { rel, abs } = assertPath(parsed.path, true);
+      const content = String(parsed.content ?? "");
+      const bytes = Buffer.byteLength(content);
+      if (bytes > maxWriteBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `content exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES (${maxWriteBytes})`,
+          bytes,
+        });
+      }
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, String(parsed.content ?? ""));
+      fs.writeFileSync(abs, content);
       return toolResult(call.id, {
         ok: true,
         path: rel,
-        bytes: Buffer.byteLength(String(parsed.content ?? "")),
+        bytes,
       });
     }
     if (call.function.name === "replace_in_file") {
