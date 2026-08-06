@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
+import { trimMessagesForProvider } from "../core/context-trim.js";
 import { compileJsonSchema } from "../core/schema-validator.js";
 import { WorkspaceGuard } from "../core/workspace-guard.js";
 
@@ -52,6 +53,7 @@ const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
+const contextLimitBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_CONTEXT_LIMIT_BYTES", 8 * 1024 * 1024);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
   env: process.env,
 });
@@ -60,7 +62,14 @@ const allowed = String(process.env.OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES || ""
   .map((entry) => entry.trim())
   .filter(Boolean)
   .map((entry) => path.normalize(entry));
-const workspace = new WorkspaceGuard(cwd, allowed);
+let workspace: WorkspaceGuard;
+try {
+  workspace = new WorkspaceGuard(cwd, allowed);
+} catch (error) {
+  throw new Error(
+    `invalid --cd path '${cd}': ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
 
 if (!apiKey && !apiKeyOptional) throw new Error(`missing API key in ${apiKeyEnv}`);
 
@@ -335,7 +344,7 @@ async function chat(messages: Message[], turn: number, allowTools: boolean): Pro
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     const payload: Record<string, unknown> = {
       model,
-      messages,
+      messages: trimMessagesForProvider(messages, contextLimitBytes),
       temperature: 0,
     };
     if (maxTokens > 0) payload.max_tokens = maxTokens;
