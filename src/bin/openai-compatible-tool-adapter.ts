@@ -51,6 +51,7 @@ const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
+const maxReplaceBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_REPLACE_BYTES", 4 * 1024 * 1024);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
   env: process.env,
@@ -566,6 +567,15 @@ async function executeTool(call: ToolCall): Promise<Message> {
       const replacement = String(parsed.replacement ?? "");
       const replaceAll = parsed.replaceAll === true;
       if (!search) return toolResult(call.id, { ok: false, error: "missing search" });
+      const st = fs.statSync(abs);
+      if (st.size > maxReplaceBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `file exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_REPLACE_BYTES (${maxReplaceBytes}); refuse full-file load for replace_in_file`,
+          bytes: st.size,
+        });
+      }
       const before = fs.readFileSync(abs, "utf8");
       const occurrences = before.split(search).length - 1;
       if (occurrences === 0)
