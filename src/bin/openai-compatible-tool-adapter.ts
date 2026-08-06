@@ -548,7 +548,7 @@ function executeTool(call: ToolCall): Message {
       const maxResults = Math.max(1, Math.min(Number(parsed.maxResults || 50), 200));
       const pattern = String(parsed.pattern || "");
       if (!pattern.trim()) return toolResult(call.id, { ok: false, error: "missing pattern" });
-      const result = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--", pattern, relPath], {
+      const result = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--exclude-dir=node_modules", "--", pattern, relPath], {
         cwd,
         encoding: "utf8",
         timeout: Math.min(commandTimeoutMs, 30000),
