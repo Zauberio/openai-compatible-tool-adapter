@@ -51,3 +51,32 @@ function git(cwd, args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   if (result.status !== 0) throw new Error(`${args.join(" ")} failed: ${result.stderr}`);
 }
+
+test("search_files must not follow directory symlinks (grep -r + guard)", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-search-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "adapter-search-out-"));
+  try {
+    writeFileSync(path.join(outside, "secret.txt"), "TOPSECRET_MARKER\n");
+    writeFileSync(path.join(root, "inside.txt"), "safe\n");
+    symlinkSync(outside, path.join(root, "escape"), "dir");
+
+    const deref = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--", "TOPSECRET_MARKER", "."], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    const noderef = spawnSync("grep", ["-rIn", "--exclude-dir=.git", "--", "TOPSECRET_MARKER", "."], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    // -R would leak; -r must not.
+    assert.match(String(deref.stdout || ""), /TOPSECRET_MARKER/);
+    assert.equal(String(noderef.stdout || "").trim(), "");
+
+    // Post-filter: any leaked path through escape/ must fail WorkspaceGuard.
+    const guard = new WorkspaceGuard(root);
+    assert.throws(() => guard.assertPath("escape/secret.txt", false), /symlink/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});

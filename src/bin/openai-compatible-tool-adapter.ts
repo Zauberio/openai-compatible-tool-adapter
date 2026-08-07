@@ -548,7 +548,9 @@ function executeTool(call: ToolCall): Message {
       const maxResults = Math.max(1, Math.min(Number(parsed.maxResults || 50), 200));
       const pattern = String(parsed.pattern || "");
       if (!pattern.trim()) return toolResult(call.id, { ok: false, error: "missing pattern" });
-      const result = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--exclude-dir=node_modules", "--", pattern, relPath], {
+      // -r (not -R): do not follow directory symlinks that escape the workspace.
+      // GNU grep -r is --no-dereference; -R follows dir links and can leak /etc etc.
+      const result = spawnSync("grep", ["-rIn", "--exclude-dir=.git", "--exclude-dir=node_modules", "--", pattern, relPath], {
         cwd,
         encoding: "utf8",
         timeout: Math.min(commandTimeoutMs, 30000),
@@ -557,6 +559,19 @@ function executeTool(call: ToolCall): Message {
       const lines = String(result.stdout || "")
         .split(/\n/)
         .filter(Boolean)
+        .filter((line) => {
+          // Post-filter: drop any match whose file path fails WorkspaceGuard
+          // (defense in depth if a platform grep still follows links).
+          // grep -n format: path:lineno:text (path itself rarely contains ':')
+          const filePart = line.split(":")[0] || "";
+          if (!filePart) return false;
+          try {
+            assertPath(filePart, false);
+            return true;
+          } catch {
+            return false;
+          }
+        })
         .slice(0, maxResults);
       return toolResult(call.id, {
         ok: result.status === 0 || result.status === 1,
