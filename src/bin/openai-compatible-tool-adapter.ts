@@ -38,7 +38,15 @@ const outputSchemaJson =
     : null;
 const outputSchemaValidator = outputSchemaJson ? compileJsonSchema(outputSchemaJson) : null;
 const cwd = path.resolve(cd);
-const baseUrl = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_BASE_URL").replace(/\/$/, "");
+const baseUrl = (() => {
+  const raw = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_BASE_URL").replace(/\/$/, "");
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch { throw new Error("OPENAI_COMPATIBLE_ADAPTER_BASE_URL must be a valid URL"); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`OPENAI_COMPATIBLE_ADAPTER_BASE_URL must use http:// or https:// (got ${parsed.protocol})`);
+  }
+  return raw;
+})();
 const model = requiredEnv("OPENAI_COMPATIBLE_ADAPTER_MODEL");
 const apiKeyEnv = process.env.OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV || "OPENAI_API_KEY";
 const apiKey = process.env[apiKeyEnv] || "";
