@@ -765,8 +765,12 @@ function requiredEnv(name: string): string {
 function numberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return fallback;
-  const value = Number(raw ?? fallback);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  // Decimal-only: Number("0x10") = 16 and Number("1e2") = 100 are almost
+  // certainly operator typos for decimal values. Safe-integer bound too.
+  const text = String(raw ?? fallback).trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) return fallback;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function numberEnvZeroMeansUnlimited(name: string, fallback: number): number {
@@ -791,6 +795,19 @@ function jsonObjectEnv(name: string): Record<string, string> {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${name} must contain a JSON object`);
+  }
+  // JSON.parse silently collapses duplicate keys (last wins) - for header
+  // overrides this can silently remove an auth-related header, so detect
+  // duplicates on the RAW text at top level before parsing collapses them.
+  const seenKeys = new Set<string>();
+  const keyPattern = /"((?:\\.|[^"\\])*)"\s*:/g;
+  let keyMatch: RegExpExecArray | null;
+  while ((keyMatch = keyPattern.exec(raw)) !== null) {
+    const key = keyMatch[1];
+    if (seenKeys.has(key)) {
+      throw new Error(`${name} contains duplicate key "${key}"`);
+    }
+    seenKeys.add(key);
   }
   return Object.fromEntries(
     Object.entries(parsed).map(([key, value]) => [key, String(value)]),
@@ -819,8 +836,10 @@ function truthyEnv(name: string): boolean {
 function numberEnvAllowZero(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return 0;
-  const value = Number(raw ?? fallback);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+  const text = String(raw ?? fallback).trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) return fallback;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
 function truncate(value: unknown, limit = 12000): string {
