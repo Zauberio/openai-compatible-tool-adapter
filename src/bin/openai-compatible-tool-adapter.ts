@@ -766,7 +766,14 @@ function numberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return fallback;
   const value = Number(raw ?? fallback);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  if (Number.isFinite(value) && value > 0) return value;
+  // A provided-but-invalid value silently becoming the default hides
+  // operator errors (MAX_RETRIES=abc -> 3 retries, MAX_RETRIES=0 ->
+  // 3 retries when the operator meant "no retries"). Warn loudly.
+  process.stderr.write(
+    `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid positive number, using default ${fallback}\n`,
+  );
+  return fallback;
 }
 
 function numberEnvZeroMeansUnlimited(name: string, fallback: number): number {
@@ -820,7 +827,11 @@ function numberEnvAllowZero(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return 0;
   const value = Number(raw ?? fallback);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+  if (Number.isFinite(value) && value >= 0) return value;
+  process.stderr.write(
+    `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid non-negative number, using default ${fallback}\n`,
+  );
+  return fallback;
 }
 
 function truncate(value: unknown, limit = 12000): string {
