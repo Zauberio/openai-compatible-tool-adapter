@@ -90,7 +90,9 @@ const apiKey = process.env[apiKeyEnv] || "";
 const apiKeyOptional = truthyEnv("OPENAI_COMPATIBLE_ADAPTER_API_KEY_OPTIONAL");
 const extraHeaders = jsonObjectEnv("OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON");
 const maxTurns = numberEnvZeroMeansUnlimited("OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS", 20);
-const maxRetries = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES", 3);
+// 0 = no retries (single attempt); negative/fractional rejected loudly
+// instead of silently falling back to the default.
+const maxRetries = numberEnvNonNegativeInt("OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES", 3);
 const readLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT", 200000);
 const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS", 120000);
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
@@ -386,7 +388,7 @@ async function main() {
 }
 
 async function chat(messages: Message[], turn: number, allowTools: boolean): Promise<any> {
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+  for (let attempt = 1; attempt <= Math.max(1, maxRetries); attempt += 1) {
     const payload: Record<string, unknown> = {
       model,
       messages,
@@ -939,6 +941,16 @@ function sleep(ms: number): Promise<void> {
 
 function truthyEnv(name: string): boolean {
   return /^(1|true|yes|on)$/i.test(String(process.env[name] || "").trim());
+}
+
+function numberEnvNonNegativeInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return value;
 }
 
 function numberEnvAllowZero(name: string, fallback: number): number {
