@@ -11,6 +11,15 @@ export class WorkspaceGuard {
 
   constructor(cwd: string, allowedFiles: string[] = []) {
     this.cwd = path.resolve(cwd);
+    // Validate up front: a nonexistent --cd produced a raw fs ENOENT stack,
+    // and a regular FILE passed (realpathSync succeeds) only to fail later
+    // in every tool. Fail fast with a clear message.
+    if (!fs.existsSync(this.cwd)) {
+      throw new Error(`--cd target does not exist: ${this.cwd}`);
+    }
+    if (!fs.statSync(this.cwd).isDirectory()) {
+      throw new Error(`--cd target is not a directory: ${this.cwd}`);
+    }
     this.cwdReal = fs.realpathSync(this.cwd);
     this.allowedFiles = allowedFiles.map((entry) => path.normalize(entry));
   }
