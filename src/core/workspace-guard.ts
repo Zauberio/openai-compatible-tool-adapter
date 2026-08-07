@@ -53,7 +53,59 @@ export class WorkspaceGuard {
     const paths = parseNumstatPaths(String(scan.stdout || ""));
     if (paths.length === 0) throw new Error("patch does not touch any repository files");
     for (const file of paths) this.assertPath(file, true);
+    // git apply --numstat emits ONLY the new name for rename/copy records,
+    // so the SOURCE path is never validated against the allowlist - a rename
+    // could silently delete/overwrite an unlisted file. Parse the patch text
+    // for rename/copy sources and check them too.
+    for (const src of this.parseRenameSources(patch)) {
+      this.assertPath(src, true);
+    }
+    // Symlink creation in the same patch (mode 120000): the numstat scan
+    // cannot see through a symlink that does not exist yet, so write-through
+    // protection rests on git's own symlink guard (CVE-2022-39253 fix,
+    // git >= 2.30.5/2.38.1). Reject symlinks whose target escapes the
+    // workspace regardless of git version.
+    for (const target of this.parseSymlinkTargets(patch)) {
+      this.assertSymlinkTarget(target);
+    }
     return paths;
+  }
+
+  // "new file mode 120000" + following "+<target>" line: the symlink target.
+  parseSymlinkTargets(patch: string): string[] {
+    const targets: string[] = [];
+    const re = /^new file mode 120000\s*\n(?:index [0-9a-f.]+\s*\n)?--- .*\n\+\+\+ .*\n@@ .*\n\+([^\n]+)$/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(patch)) !== null) {
+      const target = m[1].trim();
+      if (target) targets.push(target);
+    }
+    return targets;
+  }
+
+  assertSymlinkTarget(target: string): void {
+    if (!target) return;
+    // The target need not exist yet (symlink to a to-be-created file), so
+    // realpath-based assertPath would reject legit in-workspace targets.
+    // Use lexical containment for the target path.
+    const resolved = path.isAbsolute(target) ? path.normalize(target) : path.resolve(this.cwd, target);
+    const rel = path.relative(this.cwd, resolved).replace(/\\/g, "/");
+    if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
+      throw new Error(`symlink target escapes cwd: ${target}`);
+    }
+  }
+
+  // "rename from <path>" / "copy from <path>" lines carry the pre-image path
+  // that numstat hides for rename/copy records.
+  parseRenameSources(patch: string): string[] {
+    const sources: string[] = [];
+    const re = /^\s*(?:rename|copy)\s+from\s+(.+)$/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(patch)) !== null) {
+      const src = m[1].trim();
+      if (src && src !== "/dev/null") sources.push(src);
+    }
+    return sources;
   }
 
   private resolveRealTarget(abs: string, write: boolean): string {
