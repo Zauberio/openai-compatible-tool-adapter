@@ -803,7 +803,13 @@ function retryDelayMs(response: Response | null, attempt: number): number {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30000);
     const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) return Math.max(0, Math.min(dateMs - Date.now(), 30000));
+    // A stale/zero HTTP-date (e.g. Thu, 01 Jan 1970) or a date already in
+    // the past would yield 0ms here and bypass the exponential backoff,
+    // turning a rate-limited backend into an immediate retry storm. Fall
+    // through to the backoff when the computed delay is non-positive.
+    if (Number.isFinite(dateMs) && dateMs > Date.now()) {
+      return Math.min(dateMs - Date.now(), 30000);
+    }
   }
   return Math.min(1000 * 2 ** Math.max(0, attempt - 1), 10000) + Math.floor(Math.random() * 250);
 }
