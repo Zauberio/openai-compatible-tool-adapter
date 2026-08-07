@@ -535,12 +535,19 @@ function executeTool(call: ToolCall): Message {
         timeout,
         maxBuffer: 1024 * 1024,
       });
+      const stdout = String(result.stdout ?? "");
+      const stderr = String(result.stderr ?? "");
+      // Binary output decoded as UTF-8 mangles to U+FFFD replacement chars.
+      // Flag it so the model knows the text is corrupted, not meaningful
+      // content (e.g. `cat image.png` or any binary producer).
+      const binaryOutput = /\uFFFD/.test(stdout) || /\uFFFD/.test(stderr);
       return toolResult(call.id, {
         ok: result.status === 0,
         status: result.status,
         signal: result.signal,
-        stdout: truncate(result.stdout, commandOutputLimit),
-        stderr: truncate(result.stderr, commandOutputLimit),
+        stdout: truncate(stdout, commandOutputLimit),
+        stderr: truncate(stderr, commandOutputLimit),
+        ...(binaryOutput ? { binaryOutput: true, note: "output contained non-UTF-8 bytes; text above is lossy" } : {}),
       });
     }
     if (call.function.name === "search_files") {
