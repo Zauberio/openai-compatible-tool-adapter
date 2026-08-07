@@ -208,7 +208,7 @@ async function main() {
       const result = executeTool(call);
       toolsExecuted += 1;
       recordObservedEvidence(call, result);
-      process.stdout.write(`tool_result: ${truncate(result.content, 2000)}\n`);
+      process.stdout.write(`tool_result: ${truncateJsonLine(String(result.content ?? ""))}\n`);
       messages.push(result);
     }
   }
@@ -481,8 +481,12 @@ function executeTool(call: ToolCall): Message {
     }
     if (call.function.name === "read_file_range") {
       const { rel, abs } = assertPath(parsed.path, false);
-      const start = Math.max(1, Number(parsed.start || 1));
-      const end = Math.max(start, Number(parsed.end || start));
+      const toInt = (v: unknown, fallback: number): number => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+      };
+      const start = toInt(parsed.start ?? 1, 1);
+      const end = Math.max(start, toInt(parsed.end, start));
       return readFileRange(call.id, rel, abs, start, end);
     }
     if (call.function.name === "write_file") {
@@ -545,7 +549,10 @@ function executeTool(call: ToolCall): Message {
     }
     if (call.function.name === "search_files") {
       const relPath = parsed.path ? assertPath(String(parsed.path), false).rel : ".";
-      const maxResults = Math.max(1, Math.min(Number(parsed.maxResults || 50), 200));
+      const parsedMax = Number(parsed.maxResults ?? 50);
+      const maxResults = Number.isFinite(parsedMax)
+        ? Math.max(1, Math.min(Math.floor(parsedMax), 200))
+        : 50;
       const pattern = String(parsed.pattern || "");
       if (!pattern.trim()) return toolResult(call.id, { ok: false, error: "missing pattern" });
       const result = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--", pattern, relPath], {
@@ -614,9 +621,13 @@ function lineRange(parsed: Record<string, unknown>): { start: number; end: numbe
   const rawEnd = parsed.end;
   const rawLimit = parsed.limit;
   if (rawStart === undefined && rawEnd === undefined && rawLimit === undefined) return null;
-  const start = Math.max(1, Number(rawStart ?? 1));
-  if (rawEnd !== undefined) return { start, end: Math.max(start, Number(rawEnd)) };
-  const limit = Math.max(1, Number(rawLimit ?? 120));
+  const toInt = (v: unknown, fallback: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+  };
+  const start = toInt(rawStart, 1);
+  if (rawEnd !== undefined) return { start, end: Math.max(start, toInt(rawEnd, start)) };
+  const limit = toInt(rawLimit, 120);
   return { start, end: start + limit - 1 };
 }
 
@@ -828,6 +839,30 @@ function truncate(value: unknown, limit = 12000): string {
   return text.length > limit
     ? `${text.slice(0, limit)}\n...[truncated ${text.length - limit} chars]`
     : text;
+}
+
+// Truncate a serialized tool result so the emitted `tool_result:` line stays a
+// single line of VALID JSON. Cutting the JSON string mid-value (as a plain
+// truncate() would) emits corrupt JSON plus a stray trailer line that breaks
+// line-oriented stdout framing for the host.
+function truncateJsonLine(json: string, limit = 2000): string {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch {
+    return truncate(json, limit);
+  }
+  const deep = (value: unknown): unknown => {
+    if (typeof value === "string") return truncate(value, Math.max(1, limit));
+    if (Array.isArray(value)) return value.slice(0, 8).map(deep);
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value)) out[k] = deep(v);
+      return out;
+    }
+    return value;
+  };
+  return JSON.stringify(deep(obj));
 }
 
 
