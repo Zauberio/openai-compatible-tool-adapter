@@ -1,5 +1,16 @@
 export type ToolCall = { id: string; function: { name: string; arguments?: string } };
 
+/**
+ * True for adapter-generated tool-call ids that back textual tool calls
+ * encoded in assistant content (see pseudoToolCalls and the normalizeToolCall
+ * id fallback). Tool results returned for these ids have no assistant
+ * tool_calls entry in the conversation window, so context trimming must not
+ * treat them as orphans.
+ */
+export function isSyntheticToolCallId(id: string | undefined | null): boolean {
+  return typeof id === "string" && (id.startsWith("pseudo-") || id.startsWith("tool-"));
+}
+
 function normalizeFinalContent(content: string): string {
   const trimmed = content.trim();
   if (!trimmed) return "\n";

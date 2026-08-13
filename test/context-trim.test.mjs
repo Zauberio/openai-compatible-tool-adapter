@@ -52,6 +52,41 @@ test("oldest complete tool_call/tool_result pairs are dropped, system+user kept"
   assert.ok(serialized.includes("progress"));
 });
 
+test("textual tool-call results with synthetic ids survive trimming", () => {
+  const messages = [
+    msg("system", "sys"),
+    msg("user", "prompt"),
+    msg("assistant", '{"tool_calls":[{"type":"read_file","path":"a.txt"}]}'),
+    msg("tool", "file contents", { tool_call_id: "pseudo-123-0" }),
+    msg("assistant", "done"),
+  ];
+  const out = trimMessagesForProvider(messages, 1024 * 1024);
+  const serialized = JSON.stringify(out);
+  assert.ok(serialized.includes("file contents"), "synthetic result kept");
+  assert.ok(serialized.includes("pseudo-123-0"));
+  assert.equal(out.length, 5);
+});
+
+test("synthetic tool results are kept when real pairs are dropped for budget", () => {
+  const messages = [
+    msg("system", "sys"),
+    msg("user", "prompt"),
+    msg("assistant", null, { tool_calls: [{ id: "call-1" }] }),
+    msg("tool", "r1", { tool_call_id: "call-1" }),
+    msg("assistant", '{"tool_calls":[{"type":"read_file","path":"b.txt"}]}'),
+    msg("tool", "r2-pseudo", { tool_call_id: "tool-456-0" }),
+    msg("assistant", "final"),
+  ];
+  const block1Bytes = bytes(messages[2]) + bytes(messages[3]);
+  const budget = messages.reduce((a, m) => a + bytes(m), 0) - block1Bytes;
+  const out = trimMessagesForProvider(messages, budget);
+  const serialized = JSON.stringify(out);
+  assert.ok(!serialized.includes("call-1"), "real pair dropped first");
+  assert.ok(!serialized.includes('"r1"'));
+  assert.ok(serialized.includes("r2-pseudo"), "synthetic result kept under pressure");
+  assert.ok(serialized.includes("final"));
+});
+
 test("aggressive budget drops multiple pairs oldest-first", () => {
   const messages = [
     msg("system", "sys"),

@@ -1,3 +1,5 @@
+import { isSyntheticToolCallId } from "./textual-tools.js";
+
 export type TrimMessage = {
   role: string;
   content?: string | null;
@@ -12,7 +14,8 @@ const messageBytes = (message: TrimMessage): number =>
  * Bound the message history sent to the provider by dropping the oldest
  * complete (tool_call, tool_result) pairs. The system prompt (index 0) and
  * the first user prompt (index 1) are always preserved, as are standalone
- * assistant text messages. Orphaned tool results (no matching call in the
+ * assistant text messages and tool results that back textual tool calls
+ * (adapter-synthetic ids). Orphaned tool results (no matching call in the
  * window) are never sent, since providers reject them.
  */
 export function trimMessagesForProvider<T extends TrimMessage>(
@@ -47,6 +50,11 @@ export function trimMessagesForProvider<T extends TrimMessage>(
       const block = callIdToBlock.get(message.tool_call_id);
       if (block) {
         block.resultIdx.push(index);
+      } else if (isSyntheticToolCallId(message.tool_call_id)) {
+        // Tool result backing a textual tool call (adapter-synthetic id):
+        // no assistant tool_calls entry exists in the window, but the result
+        // is load-bearing for the textual call, so keep it.
+        continue;
       } else {
         // Tool result without its call in the window: never send it.
         dropped.add(index);
