@@ -182,6 +182,8 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 | `OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT` | `200000` | Maximum returned Git diff output. |
 | `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` | unset | Comma-separated exact relative paths allowed for direct writes and patches. |
 
+`run_command` captures child stdout/stderr into a raw buffer of `max(16 MiB, COMMAND_OUTPUT_LIMIT + 1 MiB)` before the returned-output limit above is applied. Output that fits in that floor is truncated to `COMMAND_OUTPUT_LIMIT`. Commands whose output exceeds the raw capture floor are terminated and reported as `ok: false` — the command did not complete.
+
 Example write allowlist:
 
 ```bash
