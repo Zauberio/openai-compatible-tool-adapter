@@ -35,13 +35,43 @@ if (outputSchemaAbs && !fs.existsSync(outputSchemaAbs)) {
 const maxSchemaBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES", 256 * 1024);
 const outputSchemaJson = (() => {
   if (!outputSchemaAbs || !fs.existsSync(outputSchemaAbs)) return null;
-  const st = fs.statSync(outputSchemaAbs);
-  if (st.size > maxSchemaBytes) {
-    throw new Error(
-      `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
-    );
+  const fd = fs.openSync(outputSchemaAbs, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error(`output schema must be a regular file: ${outputSchemaAbs}`);
+    }
+    if (st.size > maxSchemaBytes) {
+      throw new Error(
+        `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
+      );
+    }
+    const chunks: Buffer[] = [];
+    let accumulated = 0;
+    let position = 0;
+    const buf = Buffer.alloc(64 * 1024);
+    while (accumulated <= maxSchemaBytes) {
+      const nread = fs.readSync(
+        fd,
+        buf,
+        0,
+        Math.min(buf.length, maxSchemaBytes + 1 - accumulated),
+        position,
+      );
+      if (nread === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, nread)));
+      accumulated += nread;
+      position += nread;
+    }
+    if (accumulated > maxSchemaBytes) {
+      throw new Error(
+        `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
+      );
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } finally {
+    fs.closeSync(fd);
   }
-  return JSON.parse(fs.readFileSync(outputSchemaAbs, "utf8"));
 })();
 const outputSchemaValidator = outputSchemaJson ? compileJsonSchema(outputSchemaJson) : null;
 const cwd = path.resolve(cd);
