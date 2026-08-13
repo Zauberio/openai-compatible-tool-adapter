@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { WorkspaceGuard } from "../dist/core/workspace-guard.js";
+import { searchFiles } from "../dist/core/search-files.js";
 
 test("rejects read and write paths that escape through symlinks", () => {
   const root = mkdtempSync(path.join(tmpdir(), "adapter-root-"));
@@ -52,31 +53,49 @@ function git(cwd, args) {
   if (result.status !== 0) throw new Error(`${args.join(" ")} failed: ${result.stderr}`);
 }
 
-test("search_files must not follow directory symlinks (grep -r + guard)", () => {
+test("search_files (production handler) prunes node_modules and symlink escapes", () => {
   const root = mkdtempSync(path.join(tmpdir(), "adapter-search-"));
   const outside = mkdtempSync(path.join(tmpdir(), "adapter-search-out-"));
   try {
+    writeFileSync(path.join(root, "inside.txt"), "TOPSECRET_MARKER\n");
     writeFileSync(path.join(outside, "secret.txt"), "TOPSECRET_MARKER\n");
-    writeFileSync(path.join(root, "inside.txt"), "safe\n");
+    writeFileSync(path.join(root, "odd:name.txt"), "TOPSECRET_MARKER\n");
+    mkdirSync(path.join(root, "node_modules", "dep"), { recursive: true });
+    mkdirSync(path.join(root, "pkg", "node_modules", "dep"), { recursive: true });
+    writeFileSync(path.join(root, "node_modules", "dep", "index.js"), "TOPSECRET_MARKER\n");
+    writeFileSync(path.join(root, "pkg", "node_modules", "dep", "index.js"), "TOPSECRET_MARKER\n");
     symlinkSync(outside, path.join(root, "escape"), "dir");
 
-    const deref = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--", "TOPSECRET_MARKER", "."], {
-      cwd: root,
-      encoding: "utf8",
-    });
-    const noderef = spawnSync("grep", ["-rIn", "--exclude-dir=.git", "--", "TOPSECRET_MARKER", "."], {
-      cwd: root,
-      encoding: "utf8",
-    });
-    // -R would leak; -r must not.
-    assert.match(String(deref.stdout || ""), /TOPSECRET_MARKER/);
-    assert.equal(String(noderef.stdout || "").trim(), "");
-
-    // Post-filter: any leaked path through escape/ must fail WorkspaceGuard.
     const guard = new WorkspaceGuard(root);
-    assert.throws(() => guard.assertPath("escape/secret.txt", false), /symlink/);
+    const result = searchFiles(root, ".", "TOPSECRET_MARKER", 200, guard, 30000);
+
+    assert.equal(result.ok, true);
+    // node_modules is pruned at any depth, and the symlink escape never leaks.
+    assert.ok(!result.matches.some((m) => m.includes("node_modules")), `node_modules leaked: ${result.matches}`);
+    assert.ok(!result.matches.some((m) => m.includes("escape")), `symlink escape leaked: ${result.matches}`);
+    // Real matches survive, including a colon-containing file name (the
+    // delimiter-safe parser must not truncate it at the first ':').
+    assert.deepEqual([...result.matches].sort(), [
+      "./inside.txt:1:TOPSECRET_MARKER",
+      "./odd:name.txt:1:TOPSECRET_MARKER",
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("search_files preserves matches for a single-file search path", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-search-one-"));
+  try {
+    writeFileSync(path.join(root, "solo.txt"), "TOPSECRET_MARKER\n");
+    const guard = new WorkspaceGuard(root);
+    // grep omits the file name for a single operand unless -H is used; the
+    // production handler must still return the match with its path intact.
+    const result = searchFiles(root, "solo.txt", "TOPSECRET_MARKER", 200, guard, 30000);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.matches, ["solo.txt:1:TOPSECRET_MARKER"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
