@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeToolCalls } from "../dist/core/textual-tools.js";
+import {
+  dsmlToolCalls,
+  normalizeToolCalls,
+  pseudoToolCalls,
+} from "../dist/core/textual-tools.js";
 
 const ALLOWED = ["run_command", "write_file", "search_files"];
 
@@ -10,6 +14,36 @@ test("rejects a non-array tool_calls input without crashing", () => {
   assert.deepEqual(normalizeToolCalls({}, ALLOWED), []);
   assert.deepEqual(normalizeToolCalls(42, ALLOWED), []);
   assert.deepEqual(normalizeToolCalls(true, ALLOWED), []);
+  assert.deepEqual(normalizeToolCalls(null, ALLOWED), []);
+});
+
+test("pseudoToolCalls extracts a JSON tool_calls array from content", () => {
+  const out = pseudoToolCalls(
+    '{"tool_calls":[{"name":"run_command","arguments":{"command":"echo hi"}}]}',
+    ALLOWED,
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].function.name, "run_command");
+  assert.equal(JSON.parse(out[0].function.arguments).command, "echo hi");
+});
+
+test("dsmlToolCalls extracts DSML invoke blocks from content", () => {
+  const out = dsmlToolCalls(
+    'DSML <invoke name="run_command"><parameter name="command">echo hi</parameter></invoke>',
+    ALLOWED,
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].function.name, "run_command");
+  assert.equal(JSON.parse(out[0].function.arguments).command, "echo hi");
+});
+
+test("pseudoToolCalls returns [] for non-string or empty content", () => {
+  assert.deepEqual(pseudoToolCalls(null, ALLOWED), []);
+  assert.deepEqual(pseudoToolCalls(undefined, ALLOWED), []);
+  assert.deepEqual(pseudoToolCalls(42, ALLOWED), []);
+  assert.deepEqual(pseudoToolCalls({}, ALLOWED), []);
+  assert.deepEqual(pseudoToolCalls("", ALLOWED), []);
+  assert.deepEqual(pseudoToolCalls("   ", ALLOWED), []);
 });
 
 test("normalizes a valid array of calls", () => {
