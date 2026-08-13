@@ -41,11 +41,26 @@ test("dedupes two identical pseudo entries", () => {
   assert.equal(out.length, 1);
 });
 
-test("dedupes across key-order variants (arguments are re-serialized deterministically)", () => {
+test("keeps two distinct native calls with identical arguments", () => {
+  const calls = [
+    native("a", "run_command", { command: "echo hi" }),
+    native("b", "run_command", { command: "echo hi" }),
+  ];
+  const out = normalizeToolCalls(calls, ALLOWED);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].id, "a");
+  assert.equal(out[1].id, "b");
+});
+
+test("dedupes a pseudo echo whose arguments use a different key order than the native call", () => {
   const calls = [
     native("a", "run_command", { command: "echo hi", timeoutMs: 30 }),
-    native("b", "run_command", { timeoutMs: 30, command: "echo hi" }),
+    ...pseudoToolCalls(
+      '<｜DSML｜tool_calls><invoke name="run_command"><parameter name="timeoutMs">30</parameter><parameter name="command">echo hi</parameter></invoke></｜DSML｜tool_calls>',
+      ALLOWED,
+    ),
   ];
   const out = normalizeToolCalls(calls, ALLOWED);
   assert.equal(out.length, 1);
+  assert.equal(out[0].id, "a");
 });

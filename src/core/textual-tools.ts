@@ -43,11 +43,14 @@ export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly str
     if (!normalized) continue;
     // A single assistant message can carry the same call twice: once as a
     // native tool_call and once as a JSON/DSML block in the content (the
-    // concat in the bin feeds both channels in). Executing both would run
-    // side-effecting tools twice. Dedupe by (name, normalized arguments),
-    // keeping the FIRST occurrence so native calls win over pseudo ones.
+    // concat in the bin feeds both channels in). Only the content-channel
+    // echo is deduped: a pseudo call whose (name, normalized arguments) key
+    // was already queued is dropped so side effects do not run twice. Native
+    // tool_calls are distinct requests even with identical arguments, so two
+    // same-arg native calls both survive (and seed the set so their echoes
+    // collapse against them).
     const key = `${normalized.function.name}\u0000${normalized.function.arguments}`;
-    if (seen.has(key)) continue;
+    if (normalized.id.startsWith("pseudo-") && seen.has(key)) continue;
     seen.add(key);
     out.push(normalized);
   }
