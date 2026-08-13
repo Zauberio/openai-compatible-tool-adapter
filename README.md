@@ -154,7 +154,7 @@ The adapter validates the final JSON with Ajv. If the first answer is invalid, i
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `OPENAI_COMPATIBLE_ADAPTER_BASE_URL` | required | Provider base URL, normally ending in `/v1`. |
+| `OPENAI_COMPATIBLE_ADAPTER_BASE_URL` | required | Absolute `http://` or `https://` provider base URL, normally ending in `/v1`. `file:`, `ftp:`, and other schemes are rejected at startup. |
 | `OPENAI_COMPATIBLE_ADAPTER_MODEL` | required | Model identifier sent in the Chat Completions request. |
 | `OPENAI_COMPATIBLE_ADAPTER_API_KEY_ENV` | `OPENAI_API_KEY` | Name of the environment variable containing the provider API key. |
 | `OPENAI_COMPATIBLE_ADAPTER_API_KEY_OPTIONAL` | `false` | Allows a provider request without an Authorization header. Useful for trusted local endpoints. |
