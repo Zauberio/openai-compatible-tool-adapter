@@ -25,3 +25,13 @@ test("mixed numeric segments that are real paths survive", () => {
   assert.equal(signals.length, 1);
   assert.deepEqual(signals[0].mentioned_files, ["dist/2026/notes.txt"]);
 });
+
+test("numeric-only paths that are not date-shaped survive", () => {
+  const signals = extractRepairSignals(`## Repair signals
+- check_failed: artifact at 123/456/789 and 2026/13/40 is not a date either
+`);
+  assert.equal(signals.length, 1);
+  // 123/456/789 has no 4-digit year, and 2026/13/40 has an invalid month,
+  // so neither is a date and both must stay as potential file mentions.
+  assert.deepEqual(signals[0].mentioned_files, ["123/456/789", "2026/13/40"]);
+});

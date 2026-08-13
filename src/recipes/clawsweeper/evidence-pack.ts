@@ -197,11 +197,41 @@ function addFileMentions(out: string[], value: string): void {
     const cleaned = part.trim().replace(/^@/, "").replace(/^\/+/, "").replace(/[).:,;]+$/, "");
     if (!cleaned || cleaned.includes("http") || cleaned.startsWith("github.com/") || cleaned.startsWith("www.")) continue;
     if (!cleaned.includes("/")) continue;
-    // Date-like tokens (e.g. 12/03/2026) are not file mentions.
-    if (cleaned.split("/").every((segment) => /^\d+$/.test(segment))) continue;
+    // Date-shaped tokens (e.g. 12/03/2026, 2026/03/12, 2026/03) are not file
+    // mentions. The check is deliberately narrow: arbitrary numeric paths
+    // such as 123/456/789 must survive.
+    if (isDateShaped(cleaned)) continue;
     if (/^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_.@-]+$/.test(cleaned) && !cleaned.includes(".")) continue;
     out.push(cleaned);
   }
+}
+
+function isDateShaped(value: string): boolean {
+  const segments = value.split("/");
+  if (segments.length === 2) {
+    // Year/month, e.g. 2026/03.
+    return isYear(segments[0] ?? "") && isMonth(segments[1] ?? "");
+  }
+  if (segments.length === 3) {
+    // YYYY/MM/DD or MM/DD/YYYY.
+    return (
+      (isYear(segments[0] ?? "") && isMonth(segments[1] ?? "") && isDay(segments[2] ?? "")) ||
+      (isMonth(segments[0] ?? "") && isDay(segments[1] ?? "") && isYear(segments[2] ?? ""))
+    );
+  }
+  return false;
+}
+
+function isYear(segment: string): boolean {
+  return /^\d{4}$/.test(segment);
+}
+
+function isMonth(segment: string): boolean {
+  return /^\d{1,2}$/.test(segment) && Number(segment) >= 1 && Number(segment) <= 12;
+}
+
+function isDay(segment: string): boolean {
+  return /^\d{1,2}$/.test(segment) && Number(segment) >= 1 && Number(segment) <= 31;
 }
 
 function selectRelevantFiles(changedFiles: string[], signalFiles: string[]): string[] {
