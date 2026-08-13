@@ -76,6 +76,11 @@ export function pseudoToolCalls(content: unknown, allowedTools: readonly string[
     .filter(Boolean) as ToolCall[];
 }
 
+// Tool parameters whose schema type is "boolean" (see the tool definitions
+// in src/bin/openai-compatible-tool-adapter.ts). Only these may be coerced
+// from literal "true"/"false" strings when parsing DSML markup.
+const DSML_BOOLEAN_PARAMS = new Set(["replaceAll"]);
+
 export function dsmlToolCalls(content: string, allowedTools: readonly string[]): ToolCall[] {
   if (!content.includes("DSML") || !content.includes("invoke")) return [];
   const out: ToolCall[] = [];
@@ -90,7 +95,20 @@ export function dsmlToolCalls(content: string, allowedTools: readonly string[]):
     while ((param = paramRe.exec(body))) {
       const key = param[1] || "";
       const raw = (param[2] || "").trim();
-      if (key) args[key] = raw === "true" ? true : raw === "false" ? false : /^-?\d+$/.test(raw) ? Number(raw) : raw;
+      if (key) {
+        // Only parameters whose tool schema type is boolean may be coerced
+        // from literal "true"/"false" strings; string-typed parameters
+        // (patterns, search/replace, commands) must keep literal strings.
+        args[key] = DSML_BOOLEAN_PARAMS.has(key)
+          ? raw === "true"
+            ? true
+            : raw === "false"
+              ? false
+              : raw
+          : /^-?\d+$/.test(raw)
+            ? Number(raw)
+            : raw;
+      }
     }
     const normalized = normalizePseudoToolCall({ type: name, ...args }, out.length, allowedTools);
     if (normalized) out.push(normalized);

@@ -480,6 +480,8 @@ function runCommand(command: string, cwd: string, timeout: number): Promise<{
       detached: true, // own process group so the whole tree can be terminated
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Grace period between SIGTERM and the SIGKILL escalation on timeout.
+    const killGraceMs = 150;
     const maxBuffer = 1024 * 1024;
     let stdout = "";
     let stderr = "";
@@ -518,15 +520,25 @@ function runCommand(command: string, cwd: string, timeout: number): Promise<{
       finish({ status: null, signal: null, timedOut, stdout, stderr, error: String(error.message || error) });
     });
     child.on("close", (code, signal) => {
-      // Reap any survivors of the process group (bash -lc children).
-      killGroup("SIGKILL");
+      // Reap survivors of the process group only when the command did NOT
+      // succeed: a successful command may have spawned a background
+      // helper/server with redirected output that must be allowed to outlive
+      // the adapter. Timeouts and failures still kill the whole group.
+      if (timedOut || code !== 0 || signal !== null) killGroup("SIGKILL");
       finish({ status: code, signal, timedOut, stdout, stderr });
     });
 
     const timer = setTimeout(() => {
       timedOut = true;
+      // Escalate SIGTERM -> SIGKILL to the whole process group after a short
+      // grace period, and resolve the command independently of the close
+      // handler: a descendant that ignores SIGTERM or holds stdout/stderr
+      // open must not be able to outlive the command.
       killGroup("SIGTERM");
-      // The group may not die on TERM; a second TERM is sent on close via SIGKILL reaping.
+      setTimeout(() => {
+        killGroup("SIGKILL");
+        finish({ status: null, signal: "SIGKILL", timedOut: true, stdout, stderr });
+      }, killGraceMs);
     }, timeout);
   });
 }
@@ -718,6 +730,7 @@ function readLinesBounded(abs: string, start: number, end: number, maxBytes = 4 
   lines: string[];
   totalLines: number;
   scanTruncated: boolean;
+  partialLine: boolean;
 } {
   const fd = fs.openSync(abs, "r");
   try {
@@ -728,24 +741,31 @@ function readLinesBounded(abs: string, start: number, end: number, maxBytes = 4 
       const buffer = Buffer.alloc(maxBytes);
       const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
       const content = buffer.toString("utf8", 0, bytesRead);
+      // The window may end in the middle of a long line; that trailing
+      // fragment is not a complete line and must never be served as one.
+      const partialLine = !content.endsWith("\n");
       const lines = content.split("\n");
-      return { lines, totalLines: lines.length, scanTruncated: true };
+      if (partialLine) lines.pop();
+      return { lines, totalLines: lines.length, scanTruncated: true, partialLine };
     }
     const content = fs.readFileSync(abs, "utf8");
     const lines = content.split("\n");
-    return { lines, totalLines: lines.length, scanTruncated: false };
+    return { lines, totalLines: lines.length, scanTruncated: false, partialLine: false };
   } finally {
     fs.closeSync(fd);
   }
 }
 
 function readFileRange(id: string, rel: string, abs: string, start: number, end: number): Message {
-  const { lines, totalLines, scanTruncated } = readLinesBounded(abs, start, end);
+  const { lines, totalLines, scanTruncated, partialLine } = readLinesBounded(abs, start, end);
   if (scanTruncated && end > lines.length) {
+    const error = partialLine
+      ? `the readable window ends inside line ${lines.length + 1} (the window boundary cut a long line, so its fragment cannot be served); use read_file_range with an end line <= ${lines.length} or a narrower window`
+      : `file is too large to read the requested range (${end} > ${lines.length} lines in the readable window); use a smaller end line or read_file with a smaller range`;
     return toolResult(id, {
       ok: false,
       path: rel,
-      error: `file is too large to read the requested range (${end} > ${lines.length} lines in the readable window); use a smaller end line or read_file with a smaller range`,
+      error,
     });
   }
   const boundedEnd = Math.min(Math.max(start, end), lines.length);
