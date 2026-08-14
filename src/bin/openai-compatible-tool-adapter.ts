@@ -549,7 +549,11 @@ function executeTool(call: ToolCall): Message {
     }
     if (call.function.name === "search_files") {
       const relPath = parsed.path ? assertPath(String(parsed.path), false).rel : ".";
-      const parsedMax = Number(parsed.maxResults ?? 50);
+      const rawMax = parsed.maxResults;
+      const parsedMax =
+        typeof rawMax === "string" && rawMax.trim() === ""
+          ? Number.NaN
+          : Number(rawMax ?? 50);
       const maxResults = Number.isFinite(parsedMax)
         ? Math.max(1, Math.min(Math.floor(parsedMax), 200))
         : 50;
@@ -852,17 +856,49 @@ function truncateJsonLine(json: string, limit = 2000): string {
   } catch {
     return truncate(json, limit);
   }
-  const deep = (value: unknown): unknown => {
-    if (typeof value === "string") return truncate(value, Math.max(1, limit));
-    if (Array.isArray(value)) return value.slice(0, 8).map(deep);
+  const deep = (value: unknown, stringLimit: number): unknown => {
+    if (typeof value === "string") {
+      return value.length > stringLimit ? value.slice(0, Math.max(1, stringLimit)) : value;
+    }
+    if (Array.isArray(value)) return value.slice(0, 8).map((item) => deep(item, stringLimit));
     if (value && typeof value === "object") {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value)) out[k] = deep(v);
+      for (const [k, v] of Object.entries(value)) out[k] = deep(v, stringLimit);
       return out;
     }
     return value;
   };
-  return JSON.stringify(deep(obj));
+  const dropTrailingEntry = (value: unknown): boolean => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return false;
+      if (dropTrailingEntry(value[value.length - 1])) return true;
+      value.pop();
+      return true;
+    }
+    if (value && typeof value === "object") {
+      const keys = Object.keys(value);
+      if (keys.length === 0) return false;
+      const lastKey = keys[keys.length - 1];
+      if (dropTrailingEntry((value as Record<string, unknown>)[lastKey])) return true;
+      delete (value as Record<string, unknown>)[lastKey];
+      return true;
+    }
+    return false;
+  };
+
+  let stringLimit = Math.max(1, limit);
+  let bounded = deep(obj, stringLimit);
+  let serialized = JSON.stringify(bounded);
+  while (serialized.length > limit && stringLimit > 1) {
+    stringLimit = Math.max(1, Math.floor(stringLimit / 2));
+    bounded = deep(obj, stringLimit);
+    serialized = JSON.stringify(bounded);
+  }
+  while (serialized.length > limit && dropTrailingEntry(bounded)) {
+    serialized = JSON.stringify(bounded);
+  }
+  if (serialized.length > limit) return "{}";
+  return serialized;
 }
 
 
