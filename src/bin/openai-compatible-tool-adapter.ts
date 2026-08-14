@@ -767,9 +767,10 @@ function numberEnv(name: string, fallback: number): number {
   if (raw !== undefined && raw.trim() === "") return fallback;
   const value = Number(raw ?? fallback);
   if (Number.isFinite(value) && value > 0) return value;
-  // A provided-but-invalid value silently becoming the default hides
-  // operator errors (MAX_RETRIES=abc -> 3 retries, MAX_RETRIES=0 ->
-  // 3 retries when the operator meant "no retries"). Warn loudly.
+  // Shared contract: warn and keep the default. Fail-fast settings
+  // (MAX_TURNS today; MAX_RETRIES if a later change treats 0 as
+  // "no retries") must use a dedicated throwing helper instead of
+  // changing this fallback. Keep the warning on every invalid path.
   process.stderr.write(
     `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid positive number, using default ${fallback}\n`,
   );
@@ -828,6 +829,7 @@ function numberEnvAllowZero(name: string, fallback: number): number {
   if (raw !== undefined && raw.trim() === "") return 0;
   const value = Number(raw ?? fallback);
   if (Number.isFinite(value) && value >= 0) return value;
+  // Same warn-and-fallback contract as numberEnv; 0 remains valid here.
   process.stderr.write(
     `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid non-negative number, using default ${fallback}\n`,
   );

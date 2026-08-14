@@ -182,6 +182,8 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 | `OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT` | `200000` | Maximum returned Git diff output. |
 | `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` | unset | Comma-separated exact relative paths allowed for direct writes and patches. |
 
+Invalid non-blank values for the numeric settings above emit a stderr warning and keep the documented default. Blank values keep their existing special cases (`MAX_TOKENS=""` is `0`). `MAX_TURNS` is the exception: it rejects invalid values instead of falling back.
+
 Example write allowlist:
 
 ```bash
