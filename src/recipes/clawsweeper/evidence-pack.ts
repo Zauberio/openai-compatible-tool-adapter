@@ -36,6 +36,7 @@ type EvidenceHunk = {
   file: string;
   reason: string;
   excerpt: string;
+  read_failed: boolean;
 };
 
 type EvidenceOptions = {
@@ -115,7 +116,7 @@ export function buildClawSweeperEvidencePack(
       source_pr_ref_found: sourcePrs.some((pr) => gitRefExists(targetDir, pr.local_ref)),
       source_pr_diff_read: sourcePrs.some((pr) => pr.changed_files.length > 0),
       actionable_signal_read: signals.length > 0,
-      relevant_hunk_read: sourcePrs.some((pr) => pr.relevant_hunks.some((h) => h.excerpt.length > 0)),
+      relevant_hunk_read: sourcePrs.some((pr) => pr.relevant_hunks.some((h) => !h.read_failed)),
     },
     likely_files: likelyFiles,
     validation_hints: validationHints(likelyFiles),
