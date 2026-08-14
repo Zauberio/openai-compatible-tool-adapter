@@ -835,7 +835,7 @@ function truncate(value: unknown, limit = 12000): string {
     const hi = text.charCodeAt(cut - 1);
     if (hi >= 0xd800 && hi <= 0xdbff) cut -= 1; // high surrogate with no low half
   }
-  return `${text.slice(0, cut)}\n...[truncated ${text.length - limit} chars]`;
+  return `${text.slice(0, cut)}\n...[truncated ${text.length - cut} chars]`;
 }
 
 
