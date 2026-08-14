@@ -6,6 +6,34 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { WorkspaceGuard } from "../dist/core/workspace-guard.js";
 
+test("rejects a nonexistent workspace root", () => {
+  const missing = path.join(tmpdir(), `adapter-missing-${process.pid}-${Date.now()}`);
+  assert.throws(() => new WorkspaceGuard(missing), /--cd target does not exist/);
+});
+
+test("rejects a regular file as the workspace root", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-file-root-"));
+  try {
+    const file = path.join(root, "not-a-dir.txt");
+    writeFileSync(file, "x");
+    assert.throws(() => new WorkspaceGuard(file), /--cd target is not a directory/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepts a valid directory as the workspace root", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-dir-root-"));
+  try {
+    const guard = new WorkspaceGuard(root);
+    assert.equal(guard.cwd, path.resolve(root));
+    writeFileSync(path.join(root, "ok.txt"), "ok\n");
+    assert.equal(guard.assertPath("ok.txt", false).rel, "ok.txt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects read and write paths that escape through symlinks", () => {
   const root = mkdtempSync(path.join(tmpdir(), "adapter-root-"));
   const outside = mkdtempSync(path.join(tmpdir(), "adapter-outside-"));
