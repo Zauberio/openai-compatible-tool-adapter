@@ -946,6 +946,11 @@ function truthyEnv(name: string): boolean {
 function numberEnvNonNegativeInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
+  // Require a plain decimal digit string. Number() would silently accept
+  // hex/octal/binary, scientific notation, and whitespace-padded forms.
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative integer`);
