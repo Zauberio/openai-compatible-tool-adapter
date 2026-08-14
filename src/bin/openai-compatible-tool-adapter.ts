@@ -594,18 +594,10 @@ function executeTool(call: ToolCall): Message {
         encoding: "utf8",
         maxBuffer: 2 * 1024 * 1024,
       });
-      // git diff is blind to untracked files (fresh repo => model sees "no
-      // changes" while its work sits untracked). Surface them explicitly.
-      const untracked = String(status.stdout || "")
-        .split(/\n/)
-        .filter((l) => l.startsWith("??"))
-        .map((l) => l.slice(3).trim())
-        .filter(Boolean);
       return toolResult(call.id, {
         ok: true,
         status: status.stdout,
         diff: truncate(diff.stdout, diffOutputLimit),
-        untracked: untracked.length ? untracked : undefined,
       });
     }
     return toolResult(call.id, { ok: false, error: `unknown tool ${call.function.name}` });
@@ -736,8 +728,15 @@ function worktreeHasDiff(): boolean {
   // git diff only sees TRACKED changes: a fresh repo where the model created
   // files (all untracked) would report "no diff" and the run would falsely
   // exit 2 at the end. Count untracked files too.
-  const status = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
-  if (status.status === 0 && String(status.stdout || "").trim().length > 0) return true;
+  const status = spawnSync("git", ["status", "--porcelain"], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 1 * 1024 * 1024,
+    timeout: Math.min(commandTimeoutMs, 30000),
+  });
+  if (!status.error && status.status === 0 && String(status.stdout || "").trim().length > 0) {
+    return true;
+  }
   const diff = spawnSync("git", ["diff", "--quiet", "--", "."], { cwd, encoding: "utf8" });
   return diff.status === 1;
 }
