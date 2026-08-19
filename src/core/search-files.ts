@@ -63,7 +63,7 @@ export function searchFiles(
     ok: result.status === 0 || result.status === 1,
     status: result.status,
     matches: matches.slice(0, maxResults),
-    truncated: matches.length >= maxResults,
+    truncated: matches.length > maxResults,
     stderr: result.stderr || "",
   };
 }
