@@ -122,7 +122,7 @@ export class WorkspaceGuard {
         newMode = newModeMatch[1];
         continue;
       }
-      const indexMatch = /^index [0-9a-f.]+\s+([0-7]+)$/.exec(line);
+      const indexMatch = /^index [0-9a-fA-F.]+\s+([0-7]+)$/.exec(line);
       if (indexMatch) {
         indexMode = indexMatch[1];
         continue;
@@ -207,13 +207,20 @@ export class WorkspaceGuard {
         // current does not exist (or cannot be stat'd)
       }
       let existing = path.dirname(current);
-      while (!fs.existsSync(existing)) {
-        const parent = path.dirname(existing);
-        if (parent === existing) {
-          if (!fs.existsSync(abs)) throw new Error(`no existing parent for ${abs}`);
-          return current;
+      // Use lstat so a dangling symlink is seen as existing; existsSync follows the
+      // link and would skip a broken component, letting escape/pwned look inside.
+      while (true) {
+        try {
+          fs.lstatSync(existing);
+          break;
+        } catch {
+          const parent = path.dirname(existing);
+          if (parent === existing) {
+            if (!fs.existsSync(abs)) throw new Error(`no existing parent for ${abs}`);
+            return current;
+          }
+          existing = parent;
         }
-        existing = parent;
       }
       try {
         if (fs.lstatSync(existing).isSymbolicLink()) {
