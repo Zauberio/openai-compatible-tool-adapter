@@ -538,6 +538,14 @@ function runCommand(command: string, cwd: string, timeout: number): Promise<{
       setTimeout(() => {
         killGroup("SIGKILL");
         finish({ status: null, signal: "SIGKILL", timedOut: true, stdout, stderr });
+        // Release the child handle and the piped streams after the escalation.
+        // A setsid'd grandchild can survive the group SIGKILL and keep the
+        // inherited stdout/stderr pipes open, which would otherwise keep the
+        // event loop alive and hang the process even though the promise
+        // already resolved.
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
       }, killGraceMs);
     }, timeout);
   });
