@@ -44,6 +44,22 @@ test("DSML numeric and string parameters keep their types", () => {
   assert.equal(args.pattern, "foo");
 });
 
+test("DSML string parameters preserve boolean-looking literals", () => {
+  const content = `<｜DSML｜tool_calls>
+<antml:invoke name="search_files">
+<antml:parameter name="pattern">true</antml:parameter>
+<antml:parameter name="path">false</antml:parameter>
+</antml:invoke>
+<｜/DSML｜>`;
+  const calls = dsmlToolCalls(content, ALLOWED);
+  assert.equal(calls.length, 1);
+  const args = JSON.parse(calls[0].function.arguments || "{}");
+  assert.equal(args.pattern, "true");
+  assert.equal(typeof args.pattern, "string");
+  assert.equal(args.path, "false");
+  assert.equal(typeof args.path, "string");
+});
+
 test("normalizeToolCalls preserves native boolean replaceAll", () => {
   const calls = normalizeToolCalls(
     [

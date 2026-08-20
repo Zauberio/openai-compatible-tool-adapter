@@ -693,7 +693,11 @@ async function executeTool(call: ToolCall): Promise<Message> {
         timeout: gitTimeout,
         maxBuffer: 2 * 1024 * 1024,
       });
-      if (status.error || diff.error) {
+      const diffErr = diff.error as (NodeJS.ErrnoException | undefined);
+      const diffEnobufs = Boolean(diffErr && diffErr.code === "ENOBUFS");
+      // ENOBUFS: the diff exceeded maxBuffer. Return the captured (partial)
+      // output and let diffOutputLimit truncate it, instead of failing the call.
+      if (status.error || (diff.error && !diffEnobufs)) {
         const err = status.error || diff.error;
         const timedOut = Boolean(err && (err as NodeJS.ErrnoException).code === "ETIMEDOUT");
         return toolResult(call.id, {
@@ -758,6 +762,10 @@ function readLinesBounded(abs: string, start: number, end: number, maxBytes = 4 
     }
     const content = fs.readFileSync(abs, "utf8");
     const lines = content.split("\n");
+    // A trailing newline yields a final empty element in split(); drop it so
+    // totalLines counts real lines (and read_file does not render a phantom
+    // empty trailing line). Preserve empty-file and non-newline-terminated.
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
     return { lines, totalLines: lines.length, scanTruncated: false, partialLine: false };
   } finally {
     fs.closeSync(fd);
