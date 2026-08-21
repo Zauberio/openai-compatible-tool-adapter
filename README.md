@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-43853d.svg)](https://nodejs.org/)
 
-OpenAI-Compatible Tool Adapter turns an OpenAI-compatible Chat Completions endpoint into a local, Codex-shaped coding-agent command.
+OpenAI-Compatible Tool Adapter lets OpenAI-compatible model providers plug into products that need a local repository-capable coding tool loop. Its generic provider path is the primary contract; provider-specific optimizations can be layered on without weakening that interoperable baseline.
 
-It gives a model a bounded repository tool loop, accepts prompts through stdin, can validate the final response against JSON Schema, and is designed to fit into existing automation that already knows how to invoke `codex exec`-style commands.
+It gives a model bounded repository tools for reading and editing code, accepts prompts through stdin, can validate the final response against JSON Schema, and currently exposes a Codex-shaped command interface for easy integration with existing automation. That command shape is a compatibility convenience rather than the architectural goal.
 
 > [!CAUTION]
 > The adapter can execute real shell commands and intentionally passes the runtime environment to those commands. It is **not a sandbox**. Use a dedicated unprivileged account or isolated worker, expose only the credentials the task needs, and keep commit, push, merge and deployment actions in a separate controlled stage.
@@ -22,7 +22,7 @@ It gives a model a bounded repository tool loop, accepts prompts through stdin, 
 - Real-path validation that rejects lexical traversal and symlink escapes.
 - Configurable tool-turn, request, command, output and retry limits.
 - Optional custom HTTP headers and unauthenticated local-provider mode.
-- A generic default recipe and an explicit ClawSweeper compatibility recipe.
+- A generic provider-agnostic core with optional recipes for host-specific compatibility.
 - Reproducible package builds, integration tests and install-from-tarball smoke tests.
 
 ## How it works
@@ -228,7 +228,7 @@ All path-based tools resolve real filesystem paths and reject paths or symlinks 
 
 ## Recipes
 
-Recipes add host-specific prompt preparation or result normalization without changing the generic core.
+Recipes are secondary integration layers. They add host-specific prompt preparation or result normalization without changing the generic core; new users should start with the generic path unless a product explicitly requires a compatibility recipe.
 
 ### Generic
 
