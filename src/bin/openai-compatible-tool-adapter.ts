@@ -211,7 +211,11 @@ async function main() {
       process.stdout.write(`assistant:\n${finalContent}\n`);
     }
     const calls = normalizeToolCalls(
-      ((msg.tool_calls ?? []) as ToolCall[]).concat(pseudoToolCalls(msg.content, allowedToolNames)),
+      // Providers may emit tool_calls as null, a string, an object, a number
+      // or a boolean on malformed responses. Only arrays are valid; anything
+      // else must be treated as "no calls" - an unchecked `?? []` only guards
+      // null/undefined and would crash (or corrupt the concat) on the rest.
+      (Array.isArray(msg.tool_calls) ? msg.tool_calls : []).concat(pseudoToolCalls(msg.content, allowedToolNames)),
       allowedToolNames,
     );
     process.stderr.write(`[openai-compatible-tools] turn=${turn + 1} tool_calls=${calls.length}\n`);

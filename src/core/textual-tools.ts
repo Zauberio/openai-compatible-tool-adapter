@@ -36,10 +36,16 @@ function extractJsonObject(value: string): string | null {
 }
 
 export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly string[]): ToolCall[] {
+  // Defensive contract guard: the function is exported and callers filter
+  // through Array.isArray, but a non-array input must never crash.
+  if (!Array.isArray(calls)) return [];
   return calls.map((call, index) => normalizeToolCall(call, index, allowedTools)).filter(Boolean) as ToolCall[];
 }
 
 function normalizeToolCall(call: ToolCall, index: number, allowedTools: readonly string[]): ToolCall | null {
+  // Providers have been observed to put null/undefined holes in tool_calls arrays.
+  // Optional chaining on `.function` does not protect when `call` itself is nullish.
+  if (!call || typeof call !== "object") return null;
   const name = call.function?.name || "";
   if (!allowedTools.includes(name)) return null;
   let rawArgs: Record<string, unknown> = {};
