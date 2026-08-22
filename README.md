@@ -174,6 +174,7 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 | `OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS` | `20` | Maximum model/tool-loop turns. Set `0` explicitly for unlimited turns. |
 | `OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS` | `0` | Provider output-token limit. `0` omits the limit and leaves it to the provider. |
 | `OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES` | `3` | Provider request attempts for transient failures. |
+| `OPENAI_COMPATIBLE_ADAPTER_MAX_PROMPT_BYTES` | `2097152` | Maximum bytes read from stdin for the prompt. Prompts exceeding it abort with an error. Previously stdin was unbounded; raise explicitly if you feed larger prompts. |
 | `OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS` | `600000` | Timeout for one provider request. |
 | `OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS` | `120000` | Maximum duration of one `run_command` call. |
 | `OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT` | `200000` | Maximum characters returned by a file read. |
@@ -186,6 +187,8 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 | `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` | unset | Comma-separated exact relative paths allowed for direct writes and patches. |
 
 These caps turn previously accepted large writes into controlled tool errors.
+
+Prompts larger than the cap now fail at startup with the message `stdin prompt exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_PROMPT_BYTES`.
 
 Example write allowlist:
 
