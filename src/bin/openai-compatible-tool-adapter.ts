@@ -32,10 +32,47 @@ const outputSchemaAbs = outputSchema ? path.resolve(outputSchema) : "";
 if (outputSchemaAbs && !fs.existsSync(outputSchemaAbs)) {
   throw new Error(`output schema not found: ${outputSchemaAbs}`);
 }
-const outputSchemaJson =
-  outputSchemaAbs && fs.existsSync(outputSchemaAbs)
-    ? JSON.parse(fs.readFileSync(outputSchemaAbs, "utf8"))
-    : null;
+const maxSchemaBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES", 256 * 1024);
+const outputSchemaJson = (() => {
+  if (!outputSchemaAbs || !fs.existsSync(outputSchemaAbs)) return null;
+  const fd = fs.openSync(outputSchemaAbs, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error(`output schema must be a regular file: ${outputSchemaAbs}`);
+    }
+    if (st.size > maxSchemaBytes) {
+      throw new Error(
+        `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
+      );
+    }
+    const chunks: Buffer[] = [];
+    let accumulated = 0;
+    let position = 0;
+    const buf = Buffer.alloc(64 * 1024);
+    while (accumulated <= maxSchemaBytes) {
+      const nread = fs.readSync(
+        fd,
+        buf,
+        0,
+        Math.min(buf.length, maxSchemaBytes + 1 - accumulated),
+        position,
+      );
+      if (nread === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, nread)));
+      accumulated += nread;
+      position += nread;
+    }
+    if (accumulated > maxSchemaBytes) {
+      throw new Error(
+        `output schema exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES (${maxSchemaBytes}): ${outputSchemaAbs}`,
+      );
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } finally {
+    fs.closeSync(fd);
+  }
+})();
 const outputSchemaValidator = outputSchemaJson ? compileJsonSchema(outputSchemaJson) : null;
 const cwd = path.resolve(cd);
 const baseUrl = (() => {
@@ -58,6 +95,8 @@ const readLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT", 200000);
 const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS", 120000);
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
+const maxWriteBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES", 2 * 1024 * 1024);
+const maxPatchBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES", 2 * 1024 * 1024);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
@@ -495,12 +534,22 @@ function executeTool(call: ToolCall): Message {
     }
     if (call.function.name === "write_file") {
       const { rel, abs } = assertPath(parsed.path, true);
+      const content = String(parsed.content ?? "");
+      const bytes = Buffer.byteLength(content);
+      if (bytes > maxWriteBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `content exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES (${maxWriteBytes})`,
+          bytes,
+        });
+      }
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, String(parsed.content ?? ""));
+      fs.writeFileSync(abs, content);
       return toolResult(call.id, {
         ok: true,
         path: rel,
-        bytes: Buffer.byteLength(String(parsed.content ?? "")),
+        bytes,
       });
     }
     if (call.function.name === "replace_in_file") {
@@ -523,13 +572,22 @@ function executeTool(call: ToolCall): Message {
       const after = replaceAll
         ? before.split(search).join(replacement)
         : before.replace(search, replacement);
+      const afterBytes = Buffer.byteLength(after);
+      if (afterBytes > maxWriteBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `replacement result exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES (${maxWriteBytes})`,
+          bytes: afterBytes,
+        });
+      }
       fs.writeFileSync(abs, after);
       return toolResult(call.id, {
         ok: true,
         path: rel,
         occurrences,
         replaceAll,
-        bytes: Buffer.byteLength(after),
+        bytes: afterBytes,
       });
     }
     if (call.function.name === "run_command") {
@@ -587,6 +645,14 @@ function executeTool(call: ToolCall): Message {
     if (call.function.name === "apply_patch") {
       const patch = String(parsed.patch || "");
       if (!patch.trim()) return toolResult(call.id, { ok: false, error: "missing patch" });
+      const patchBytes = Buffer.byteLength(patch);
+      if (patchBytes > maxPatchBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          error: `patch exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES (${maxPatchBytes})`,
+          bytes: patchBytes,
+        });
+      }
       const paths = workspace.assertPatch(patch);
       const result = spawnSync("git", ["apply", "--whitespace=nowarn", "-"], {
         cwd,

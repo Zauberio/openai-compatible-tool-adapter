@@ -180,7 +180,12 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 | `OPENAI_COMPATIBLE_ADAPTER_READ_LINES` | `1000` | Maximum lines returned by one ranged file read. |
 | `OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT` | `200000` | Maximum returned command output. |
 | `OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT` | `200000` | Maximum returned Git diff output. |
+| `OPENAI_COMPATIBLE_ADAPTER_MAX_SCHEMA_BYTES` | `262144` | Maximum bytes of the `--output-schema` file; non-regular files such as FIFOs/devices are rejected |
+| `OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES` | `2097152` | Maximum bytes written by `write_file` / `replace_in_file` result |
+| `OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES` | `2097152` | Maximum bytes of an `apply_patch` body |
 | `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` | unset | Comma-separated exact relative paths allowed for direct writes and patches. |
+
+These caps turn previously accepted large writes into controlled tool errors.
 
 Example write allowlist:
 
