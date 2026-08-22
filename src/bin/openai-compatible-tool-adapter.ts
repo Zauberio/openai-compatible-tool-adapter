@@ -529,18 +529,26 @@ function executeTool(call: ToolCall): Message {
       if (!command) return toolResult(call.id, { ok: false, error: "missing command" });
       command = recipe.rewriteCommand?.(command) ?? command;
       const timeout = boundedCommandTimeout(parsed.timeoutMs, commandTimeoutMs);
+      // Capture raw bytes. spawnSync({ encoding: "utf8" }) inserts U+FFFD for
+      // invalid sequences, which cannot be distinguished from a literal
+      // U+FFFD already present in valid UTF-8.
       const result = spawnSync("bash", ["-lc", command], {
         cwd,
-        encoding: "utf8",
         timeout,
         maxBuffer: 1024 * 1024,
       });
+      const stdout = decodeSpawnOutput(result.stdout);
+      const stderr = decodeSpawnOutput(result.stderr);
+      // This flag means UTF-8 decode was lossy, not that the stream is a
+      // binary file. Valid UTF-8 (including a literal U+FFFD) is not flagged.
+      const binaryOutput = stdout.lossy || stderr.lossy;
       return toolResult(call.id, {
         ok: result.status === 0,
         status: result.status,
         signal: result.signal,
-        stdout: truncate(result.stdout, commandOutputLimit),
-        stderr: truncate(result.stderr, commandOutputLimit),
+        stdout: truncate(stdout.text, commandOutputLimit),
+        stderr: truncate(stderr.text, commandOutputLimit),
+        ...(binaryOutput ? { binaryOutput: true, note: "output contained non-UTF-8 bytes; text above is lossy" } : {}),
       });
     }
     if (call.function.name === "search_files") {
@@ -821,6 +829,16 @@ function numberEnvAllowZero(name: string, fallback: number): number {
   if (raw !== undefined && raw.trim() === "") return 0;
   const value = Number(raw ?? fallback);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function decodeSpawnOutput(value: Buffer | string | null | undefined): { text: string; lossy: boolean } {
+  if (value == null) return { text: "", lossy: false };
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), lossy: false };
+  } catch {
+    return { text: new TextDecoder("utf-8").decode(bytes), lossy: true };
+  }
 }
 
 function truncate(value: unknown, limit = 12000): string {
