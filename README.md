@@ -187,6 +187,8 @@ export OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON='{"X-Project":"example"}'
 
 These caps turn previously accepted large writes into controlled tool errors.
 
+`run_command` captures child stdout/stderr into a raw buffer of `max(16 MiB, COMMAND_OUTPUT_LIMIT + 1 MiB)` before the returned-output limit above is applied. Output that fits in that floor is truncated to `COMMAND_OUTPUT_LIMIT`. Commands whose output exceeds the raw capture floor are terminated and reported as `ok: false` — the command did not complete.
+
 Example write allowlist:
 
 ```bash
