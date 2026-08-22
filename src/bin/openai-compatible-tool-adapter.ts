@@ -299,6 +299,9 @@ async function main() {
     if (!msg) throw new Error("missing final assistant message");
     finalContent = String(msg.content ?? "");
     if (finalContent) process.stdout.write(`assistant:\n${finalContent}\n`);
+    // A schema-valid deliverable produced at exhaustion is a real result:
+    // clear the flag so the exit guard below doesn't discard it as a failure.
+    exhausted = false;
   } else if (exhausted) {
     finalContent = JSON.stringify({
       status: diffExistsAtEnd ? "completed_with_diff" : "blocked",
