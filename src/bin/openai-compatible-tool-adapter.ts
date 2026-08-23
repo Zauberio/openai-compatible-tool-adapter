@@ -180,6 +180,14 @@ const observedEvidence: string[] = [];
 
 async function main() {
   const rawPrompt = fs.readFileSync(0, "utf8");
+  if (!rawPrompt.trim()) {
+    // An empty stdin prompt would be POSTed to the model as an empty user
+    // message and burn a call (exit 0, no usage error). Fail fast instead.
+    process.stderr.write(
+      "[openai-compatible-tools] error: empty prompt from stdin (pipe an instruction or use --prompt)\n",
+    );
+    process.exit(2);
+  }
   const prompt = recipe.preparePrompt(rawPrompt, cwd);
   const schemaInstruction = outputSchema
     ? `The final answer must be valid JSON matching the requested output schema path: ${outputSchema}. Do not wrap JSON in markdown.`
