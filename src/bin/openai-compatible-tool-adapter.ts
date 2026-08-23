@@ -943,9 +943,17 @@ function decodeSpawnOutput(value: Buffer | string | null | undefined): { text: s
 
 function truncate(value: unknown, limit = 12000): string {
   const text = String(value ?? "");
-  return text.length > limit
-    ? `${text.slice(0, limit)}\n...[truncated ${text.length - limit} chars]`
-    : text;
+  if (text.length <= limit) return text;
+  // slice() cuts UTF-16 code units: a limit landing inside a surrogate
+  // pair emits a lone surrogate that downstream UTF-8 consumers (provider
+  // SDKs, Python json clients) hard-fail on with "surrogates not allowed".
+  // Back up to a code-point boundary before truncating.
+  let cut = limit;
+  if (cut > 0) {
+    const hi = text.charCodeAt(cut - 1);
+    if (hi >= 0xd800 && hi <= 0xdbff) cut -= 1; // high surrogate with no low half
+  }
+  return `${text.slice(0, cut)}\n...[truncated ${text.length - cut} chars]`;
 }
 
 
