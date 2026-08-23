@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { WorkspaceGuard } from "../dist/core/workspace-guard.js";
-import { searchFiles } from "../dist/core/search-files.js";
+import { searchFiles, grepSupportsNullDelimiter } from "../dist/core/search-files.js";
 
 test("rejects a nonexistent workspace root", () => {
   const missing = path.join(tmpdir(), `adapter-missing-${process.pid}-${Date.now()}`);
@@ -126,4 +126,10 @@ test("search_files preserves matches for a single-file search path", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("grep --null support is probed without throwing", () => {
+  const supported = grepSupportsNullDelimiter();
+  assert.equal(typeof supported, "boolean");
+  assert.equal(grepSupportsNullDelimiter(), supported);
 });
