@@ -674,12 +674,29 @@ function executeTool(call: ToolCall): Message {
       });
     }
     if (call.function.name === "git_diff") {
-      const status = spawnSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
+      const status = spawnSync("git", ["status", "--short"], {
+        cwd,
+        encoding: "utf8",
+        timeout: Math.min(commandTimeoutMs, 30000),
+        maxBuffer: 2 * 1024 * 1024,
+      });
       const diff = spawnSync("git", ["diff", "--", "."], {
         cwd,
         encoding: "utf8",
+        timeout: Math.min(commandTimeoutMs, 30000),
         maxBuffer: 2 * 1024 * 1024,
       });
+      // A failed git invocation (non-repo dir, ENOBUFS on huge repos, or
+      // timeout) must be surfaced, not silently reported as "no changes".
+      const gitError = status.error?.message || diff.error?.message || "";
+      const failed = status.status !== 0 || diff.status !== 0;
+      if (failed) {
+        return toolResult(call.id, {
+          ok: false,
+          error: gitError || `git failed (status=${String(diff.status ?? status.status)})`,
+          stderr: truncate(String(status.stderr || "") + String(diff.stderr || ""), commandOutputLimit),
+        });
+      }
       return toolResult(call.id, {
         ok: true,
         status: status.stdout,
