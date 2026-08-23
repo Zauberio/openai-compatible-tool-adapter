@@ -189,6 +189,15 @@ These caps turn previously accepted large writes into controlled tool errors.
 
 Invalid non-blank values for the numeric settings above emit a stderr warning and keep the documented default. Blank values keep their existing special cases (`MAX_TOKENS=""` is `0`). `MAX_TURNS` is the exception: it rejects invalid values instead of falling back.
 
+Raw capture boundaries: `search_files` and `git_diff` read child output into a
+16 MiB raw buffer before the returned-output limits above are applied.
+`search_files` uses a fixed 16 MiB cap so a large tree can produce many
+megabytes of matches before the 200-line `maxResults` slice; if the raw output
+exceeds the cap the partial match list is reported as a truncated success
+(`truncated: true`). `git_diff` raises its raw cap to `DIFF_OUTPUT_LIMIT` + 1 MiB
+(floor 16 MiB) so the returned diff is a truncation of a complete capture
+rather than a partial read; above the raw cap the diff text is partial.
+
 Example write allowlist:
 
 ```bash
