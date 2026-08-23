@@ -811,6 +811,18 @@ function validateFinalContent(content: string): string[] {
 }
 
 function worktreeHasDiff(): boolean {
+  // git diff only sees TRACKED changes: a fresh repo where the model created
+  // files (all untracked) would report "no diff" and the run would falsely
+  // exit 2 at the end. Count untracked files too.
+  const status = spawnSync("git", ["status", "--porcelain"], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 1 * 1024 * 1024,
+    timeout: Math.min(commandTimeoutMs, 30000),
+  });
+  if (!status.error && status.status === 0 && String(status.stdout || "").trim().length > 0) {
+    return true;
+  }
   const diff = spawnSync("git", ["diff", "--quiet", "--", "."], { cwd, encoding: "utf8" });
   return diff.status === 1;
 }
