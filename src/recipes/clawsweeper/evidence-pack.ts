@@ -36,6 +36,7 @@ type EvidenceHunk = {
   file: string;
   reason: string;
   excerpt: string;
+  read_failed: boolean;
 };
 
 type EvidenceOptions = {
@@ -92,11 +93,17 @@ export function buildClawSweeperEvidencePack(
       diff_ref: diffRef,
       changed_files: changedFiles,
       diff_stat: diffRef ? gitText(targetDir, ["diff", "--stat", diffRef]) : "",
-      relevant_hunks: relevantFiles.slice(0, maxHunks).map((file) => ({
-        file,
-        reason: signalFiles.includes(file) ? "mentioned_by_repair_signal_and_changed" : "changed_in_source_pr",
-        excerpt: truncate(gitText(targetDir, ["diff", "--unified=60", diffRef, "--", file]), maxHunkBytes),
-      })),
+      relevant_hunks: relevantFiles.slice(0, maxHunks).map((file) => {
+        const excerpt = truncate(gitText(targetDir, ["diff", "--unified=60", diffRef, "--", file]), maxHunkBytes);
+        return {
+          file,
+          reason: signalFiles.includes(file) ? "mentioned_by_repair_signal_and_changed" : "changed_in_source_pr",
+          excerpt,
+          // ENOBUFS kills git with no output on diffs > 4MB: an empty excerpt
+          // must not look like a successfully read hunk.
+          read_failed: excerpt.length === 0,
+        };
+      }),
     };
   });
   const changedFiles = unique(sourcePrs.flatMap((pr) => pr.changed_files));
@@ -109,7 +116,7 @@ export function buildClawSweeperEvidencePack(
       source_pr_ref_found: sourcePrs.some((pr) => gitRefExists(targetDir, pr.local_ref)),
       source_pr_diff_read: sourcePrs.some((pr) => pr.changed_files.length > 0),
       actionable_signal_read: signals.length > 0,
-      relevant_hunk_read: sourcePrs.some((pr) => pr.relevant_hunks.length > 0),
+      relevant_hunk_read: sourcePrs.some((pr) => pr.relevant_hunks.some((h) => !h.read_failed)),
     },
     likely_files: likelyFiles,
     validation_hints: validationHints(likelyFiles),
@@ -245,7 +252,16 @@ function gitLines(targetDir: string, args: string[]): string[] {
 
 function gitText(targetDir: string, args: string[]): string {
   const result = spawnSync("git", ["-C", targetDir, ...args], { encoding: "utf8", maxBuffer: 1024 * 1024 * 4 });
-  return result.status === 0 ? result.stdout : "";
+  if (result.status === 0) return result.stdout;
+  // ENOBUFS kills the child (status null, no stdout) on diffs > 4MB - the
+  // caller would silently see "" and report the hunk as "read" with no
+  // content. Surface the failure so the evidence pack cannot mislead.
+  if (result.status === null && result.error) {
+    process.stderr.write(
+      `[clawsweeper] evidence-pack: git ${args[0] ?? ""} failed (buffer exceeded?): ${result.error.message}\n`,
+    );
+  }
+  return "";
 }
 
 function gitStatus(targetDir: string, args: string[]): number | null {
