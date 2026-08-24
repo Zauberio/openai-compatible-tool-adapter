@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { WorkspaceGuard } from "../dist/core/workspace-guard.js";
-import { searchFiles, grepSupportsNullDelimiter } from "../dist/core/search-files.js";
+import { searchFiles, grepSupportsNullDelimiter, parseColonRecords } from "../dist/core/search-files.js";
 
 test("rejects a nonexistent workspace root", () => {
   const missing = path.join(tmpdir(), `adapter-missing-${process.pid}-${Date.now()}`);
@@ -132,4 +132,25 @@ test("grep --null support is probed without throwing", () => {
   const supported = grepSupportsNullDelimiter();
   assert.equal(typeof supported, "boolean");
   assert.equal(grepSupportsNullDelimiter(), supported);
+});
+
+test("fallback colon parse keeps match text that contains colon-digits", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-search-colon-"));
+  try {
+    writeFileSync(path.join(root, "safe.txt"), "value:123:MARKER\n");
+    const guard = new WorkspaceGuard(root);
+    const result = searchFiles(root, ".", "MARKER", 200, guard, 30000);
+    assert.equal(result.ok, true);
+    assert.ok(result.matches.some((m) => m.includes("safe.txt") && m.includes("value:123:MARKER")), result.matches.join("|"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("parseColonRecords uses the first :line: split", () => {
+  const recs = parseColonRecords("safe.txt:1:value:123:MARKER\nodd:name.txt:1:TOPSECRET_MARKER\n");
+  assert.deepEqual(recs, [
+    { filePart: "safe.txt", text: "1:value:123:MARKER" },
+    { filePart: "odd:name.txt", text: "1:TOPSECRET_MARKER" },
+  ]);
 });

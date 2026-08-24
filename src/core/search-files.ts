@@ -40,13 +40,15 @@ function parseNulRecords(stdout: string): Array<{ filePart: string; text: string
   return out;
 }
 
-function parseColonRecords(stdout: string): Array<{ filePart: string; text: string }> {
+export function parseColonRecords(stdout: string): Array<{ filePart: string; text: string }> {
   const out: Array<{ filePart: string; text: string }> = [];
   for (const line of stdout.split("\n")) {
     if (!line) continue;
-    const match = line.match(/^(.*):(\d+:.*)$/);
+    // First ":digits:" from the left is grep's path/line split. A greedy
+    // right-hand match would swallow "safe.txt:1:value:123:MARKER".
+    const match = line.match(/^(.*?):(\d+):(.*)$/);
     if (!match) continue;
-    out.push({ filePart: match[1], text: match[2] });
+    out.push({ filePart: match[1], text: `${match[2]}:${match[3]}` });
   }
   return out;
 }
