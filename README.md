@@ -189,6 +189,8 @@ These caps turn previously accepted large writes into controlled tool errors.
 
 Invalid non-blank values for the numeric settings above emit a stderr warning and keep the documented default. Blank values keep their existing special cases (`MAX_TOKENS=""` is `0`). `MAX_TURNS` is the exception: it rejects invalid values instead of falling back.
 
+`run_command` captures child stdout/stderr into a raw buffer of `max(16 MiB, COMMAND_OUTPUT_LIMIT + 1 MiB)` before the returned-output limit above is applied. Output that fits in that floor is truncated to `COMMAND_OUTPUT_LIMIT`. Commands whose output exceeds the raw capture floor are terminated and reported as `ok: false` — the command did not complete.
+
 Example write allowlist:
 
 ```bash
