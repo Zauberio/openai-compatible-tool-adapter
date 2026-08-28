@@ -545,6 +545,7 @@ function runCommand(command: string, cwd: string, timeout: number): Promise<{
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let timedOut = false;
+    let overflow = false;
     let settled = false;
 
     const decoded = () => {
@@ -589,18 +590,32 @@ function runCommand(command: string, cwd: string, timeout: number): Promise<{
       }
     };
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      if (stdoutBytes < maxBuffer) {
+    const onChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      if (settled || overflow) return;
+      const next = (stream === "stdout" ? stdoutBytes : stderrBytes) + chunk.length;
+      if (next > maxBuffer) {
+        overflow = true;
+        killGroup("SIGKILL");
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish({
+          status: null,
+          signal: "SIGKILL",
+          timedOut: false,
+          error: "command output exceeded raw capture floor",
+        });
+        return;
+      }
+      if (stream === "stdout") {
         stdoutChunks.push(chunk);
-        stdoutBytes += chunk.length;
-      }
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderrBytes < maxBuffer) {
+        stdoutBytes = next;
+      } else {
         stderrChunks.push(chunk);
-        stderrBytes += chunk.length;
+        stderrBytes = next;
       }
-    });
+    };
+    child.stdout.on("data", (chunk: Buffer) => onChunk("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => onChunk("stderr", chunk));
     child.on("error", (error) => {
       finish({ status: null, signal: null, timedOut, error: String(error.message || error) });
     });
