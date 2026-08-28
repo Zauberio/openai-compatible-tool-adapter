@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
+const MAX_SYMLINK_EXPANSIONS = 256;
+
 export type GuardedPath = { rel: string; abs: string };
 
 export class WorkspaceGuard {
@@ -90,9 +92,13 @@ export class WorkspaceGuard {
     let newPath = "";
     let added: string[] = [];
     let inHunk = false;
+    let binaryPatch = false;
 
     const flush = () => {
       const mode = newMode ?? indexMode;
+      if (mode === "120000" && newPath && binaryPatch) {
+        throw new Error(`binary symlink patch is not supported: ${newPath}`);
+      }
       if (mode === "120000" && newPath && added.length > 0) {
         found.push({ link: newPath, target: added.join("\n") });
       }
@@ -101,6 +107,7 @@ export class WorkspaceGuard {
       newPath = "";
       added = [];
       inHunk = false;
+      binaryPatch = false;
     };
 
     for (const raw of lines) {
@@ -136,6 +143,10 @@ export class WorkspaceGuard {
         indexMode = indexMatch[1];
         continue;
       }
+      if (line === "GIT binary patch") {
+        binaryPatch = true;
+        continue;
+      }
       if (line.startsWith("rename to ")) {
         newPath = decodeGitPath(line.slice("rename to ".length));
         continue;
@@ -169,13 +180,65 @@ export class WorkspaceGuard {
       }
     }
     const linkDir = linkPath ? path.dirname(linkAbs) : this.cwd;
-    const resolved = path.isAbsolute(target) ? path.normalize(target) : path.resolve(linkDir, target);
-    const rel = path.relative(this.cwd, resolved).replace(/\\/g, "/");
+    const lexicalTarget = path.isAbsolute(target) ? path.normalize(target) : path.resolve(linkDir, target);
+    const rel = path.relative(this.cwd, lexicalTarget).replace(/\\/g, "/");
     if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
       throw new Error(`symlink target escapes cwd: ${target}`);
     }
-    const realTarget = this.resolveExistingPrefix(resolved);
+    const realLinkDir = this.resolveExistingPrefix(linkDir);
+    const realTarget = this.resolveSymlinkTargetComponents(realLinkDir, target);
     this.assertInside(this.cwdReal, realTarget, `symlink target escapes cwd: ${target}`);
+  }
+
+  private resolveSymlinkTargetComponents(baseDir: string, target: string): string {
+    const absoluteTarget = path.isAbsolute(target);
+    let resolved = absoluteTarget ? path.parse(target).root : baseDir;
+    let pending = splitRawPathComponents(
+      absoluteTarget ? target.slice(path.parse(target).root.length) : target,
+    );
+    const seenStates = new Set<string>();
+    let symlinkHops = 0;
+
+    while (pending.length > 0) {
+      const component = pending.shift()!;
+      if (!component || component === ".") continue;
+      if (component === "..") {
+        resolved = path.dirname(resolved);
+        continue;
+      }
+
+      const candidate = path.join(resolved, component);
+      const stat = lstatIfPresent(candidate);
+      if (!stat || !stat.isSymbolicLink()) {
+        resolved = candidate;
+        continue;
+      }
+
+      if (++symlinkHops > MAX_SYMLINK_EXPANSIONS) {
+        throw new Error("symlink cycle or excessive indirection");
+      }
+
+      const state = `${path.normalize(candidate)}\u0000${pending.join("\u0000")}`;
+      if (seenStates.has(state)) {
+        throw new Error(`symlink cycle while resolving ${target}`);
+      }
+      seenStates.add(state);
+
+      const dest = fs.readlinkSync(candidate);
+      if (path.isAbsolute(dest)) {
+        const destRoot = path.parse(dest).root;
+        resolved = destRoot;
+        pending = [
+          ...splitRawPathComponents(dest.slice(destRoot.length)),
+          ...pending,
+        ];
+      } else {
+        resolved = path.dirname(candidate);
+        pending = [...splitRawPathComponents(dest), ...pending];
+      }
+    }
+
+    return path.normalize(resolved);
   }
 
   // "rename from <path>" / "copy from <path>" lines carry the pre-image path
@@ -199,57 +262,78 @@ export class WorkspaceGuard {
   }
 
   // Follow existing symlink prefixes without requiring the final path to exist.
+  // Resolve one component at a time and preserve relative symlink destinations
+  // verbatim: applying `..` before following an intermediate symlink changes
+  // POSIX path semantics and can hide an escape.
   private resolveExistingPrefix(abs: string): string {
-    const seen = new Set<string>();
-    let current = abs;
-    for (let n = 0; n < 32; n++) {
-      if (seen.has(current)) return current;
-      seen.add(current);
-      try {
-        if (fs.lstatSync(current).isSymbolicLink()) {
-          const dest = fs.readlinkSync(current);
-          current = path.isAbsolute(dest) ? path.normalize(dest) : path.resolve(path.dirname(current), dest);
-          continue;
-        }
-        return fs.realpathSync(current);
-      } catch {
-        // current does not exist (or cannot be stat'd)
+    const absolute = path.resolve(abs);
+    const root = path.parse(absolute).root;
+    let resolved = root;
+    let pending = splitRawPathComponents(absolute.slice(root.length));
+    const seenStates = new Set<string>();
+    let symlinkHops = 0;
+
+    while (pending.length > 0) {
+      const component = pending.shift()!;
+      if (!component || component === ".") continue;
+      if (component === "..") {
+        resolved = path.dirname(resolved);
+        continue;
       }
-      let existing = path.dirname(current);
-      // Use lstat so a dangling symlink is seen as existing; existsSync follows the
-      // link and would skip a broken component, letting escape/pwned look inside.
-      while (true) {
-        try {
-          fs.lstatSync(existing);
-          break;
-        } catch {
-          const parent = path.dirname(existing);
-          if (parent === existing) {
-            if (!fs.existsSync(abs)) throw new Error(`no existing parent for ${abs}`);
-            return current;
-          }
-          existing = parent;
-        }
+
+      const candidate = path.join(resolved, component);
+      const stat = lstatIfPresent(candidate);
+      if (!stat) {
+        return path.resolve(resolved, component, ...pending);
       }
-      try {
-        if (fs.lstatSync(existing).isSymbolicLink()) {
-          const dest = fs.readlinkSync(existing);
-          const destAbs = path.isAbsolute(dest) ? path.normalize(dest) : path.resolve(path.dirname(existing), dest);
-          current = path.resolve(destAbs, path.relative(existing, current));
-          continue;
-        }
-        const realParent = fs.realpathSync(existing);
-        return path.resolve(realParent, path.relative(existing, current));
-      } catch {
-        if (!fs.existsSync(abs)) throw new Error(`no existing parent for ${abs}`);
-        return current;
+      if (!stat.isSymbolicLink()) {
+        resolved = candidate;
+        continue;
+      }
+
+      if (++symlinkHops > MAX_SYMLINK_EXPANSIONS) {
+        throw new Error("symlink cycle or excessive indirection");
+      }
+
+      const state = `${path.normalize(candidate)}\u0000${pending.join("\u0000")}`;
+      if (seenStates.has(state)) {
+        throw new Error(`symlink cycle while resolving ${abs}`);
+      }
+      seenStates.add(state);
+
+      const dest = fs.readlinkSync(candidate);
+      if (path.isAbsolute(dest)) {
+        const destRoot = path.parse(dest).root;
+        resolved = destRoot;
+        pending = [
+          ...splitRawPathComponents(dest.slice(destRoot.length)),
+          ...pending,
+        ];
+      } else {
+        resolved = path.dirname(candidate);
+        pending = [...splitRawPathComponents(dest), ...pending];
       }
     }
-    return current;
+
+    return path.normalize(resolved);
   }
 
   private assertInside(root: string, candidate: string, message: string): void {
     if (candidate !== root && !candidate.startsWith(root + path.sep)) throw new Error(message);
+  }
+}
+
+function splitRawPathComponents(value: string): string[] {
+  return process.platform === "win32" ? value.split(/[\\/]+/) : value.split(/\/+/);
+}
+
+function lstatIfPresent(candidate: string) {
+  try {
+    return fs.lstatSync(candidate);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 
@@ -266,31 +350,36 @@ function decodeGitPath(raw: string): string {
 }
 
 function unquoteCStyle(inner: string): string {
-  let out = "";
-  for (let i = 0; i < inner.length; i++) {
+  const chunks: Buffer[] = [];
+  const escapedBytes: Record<string, number> = {
+    a: 0x07,
+    b: 0x08,
+    t: 0x09,
+    n: 0x0a,
+    v: 0x0b,
+    f: 0x0c,
+    r: 0x0d,
+    '"': 0x22,
+    "\\": 0x5c,
+  };
+
+  for (let i = 0; i < inner.length; ) {
     if (inner[i] !== "\\") {
-      out += inner[i];
+      const nextSlash = inner.indexOf("\\", i);
+      const end = nextSlash === -1 ? inner.length : nextSlash;
+      chunks.push(Buffer.from(inner.slice(i, end), "utf8"));
+      i = end;
       continue;
     }
+
     const next = inner[i + 1];
     if (next === undefined) {
-      out += "\\";
+      chunks.push(Buffer.from([0x5c]));
       break;
     }
-    const escaped: Record<string, string> = {
-      a: "\x07",
-      b: "\x08",
-      t: "\t",
-      n: "\n",
-      v: "\v",
-      f: "\f",
-      r: "\r",
-      '"': '"',
-      "\\": "\\",
-    };
-    if (next in escaped) {
-      out += escaped[next];
-      i += 1;
+    if (next in escapedBytes) {
+      chunks.push(Buffer.from([escapedBytes[next]]));
+      i += 2;
       continue;
     }
     if (next >= "0" && next <= "7") {
@@ -300,14 +389,15 @@ function unquoteCStyle(inner: string): string {
         oct += inner[j];
         j += 1;
       }
-      out += String.fromCharCode(parseInt(oct, 8));
-      i = j - 1;
+      chunks.push(Buffer.from([parseInt(oct, 8)]));
+      i = j;
       continue;
     }
-    out += next;
-    i += 1;
+    chunks.push(Buffer.from(next, "utf8"));
+    i += 2;
   }
-  return out;
+
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function stripAbPrefix(p: string): string {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,6 +31,25 @@ test("accepts a valid directory as the workspace root", () => {
     assert.equal(guard.assertPath("ok.txt", false).rel, "ok.txt");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("preserves dot-dot ordering inside existing symlink prefixes for direct writes", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-prefix-dotdot-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "adapter-prefix-dotdot-out-"));
+  try {
+    mkdirSync(path.join(outside, "nested"));
+    symlinkSync(outside, path.join(root, "escape"), "dir");
+    symlinkSync("escape/..", path.join(root, "a"), "dir");
+    const guard = new WorkspaceGuard(root);
+    assert.throws(
+      () => guard.assertPath("a/new.txt", true),
+      /path escapes cwd through symlink/,
+    );
+    assert.equal(existsSync(path.join(root, "a", "new.txt")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
@@ -218,6 +237,135 @@ test("rejects symlink targets that escape through existing symlink components", 
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("rejects binary post-images for mode-120000 symlink patches", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-binary-link-"));
+  try {
+    initGit(root);
+    writeFileSync(path.join(root, "keep.txt"), "keep\n");
+    git(root, ["add", "keep.txt"]);
+    git(root, ["commit", "-q", "-m", "base"]);
+
+    const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: root,
+      input: Buffer.from([0x2e, 0x2e, 0x2f, 0x00, 0x78]),
+    });
+    assert.equal(blob.status, 0, String(blob.stderr));
+    const hash = String(blob.stdout).trim();
+    git(root, ["update-index", "--add", "--cacheinfo", `120000,${hash},binary-link`]);
+    const patch = git(root, ["diff", "--cached", "--binary"]).stdout;
+    git(root, ["reset", "--hard", "-q"]);
+
+    assert.match(patch, /new file mode 120000/);
+    assert.match(patch, /GIT binary patch/);
+    const guard = new WorkspaceGuard(root);
+    assert.throws(() => guard.assertPatch(patch), /binary symlink patch is not supported/);
+    assert.equal(existsSync(path.join(root, "binary-link")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("preserves dot-dot ordering after following an existing symlink", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-dotdot-link-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "adapter-dotdot-out-"));
+  try {
+    initGit(root);
+    writeFileSync(path.join(root, "keep.txt"), "keep\n");
+    writeFileSync(path.join(outside, "secret.txt"), "secret\n");
+    git(root, ["add", "keep.txt"]);
+    git(root, ["commit", "-q", "-m", "base"]);
+
+    symlinkSync(path.join(outside, "nested"), path.join(root, "escape"), "dir");
+    const guard = new WorkspaceGuard(root);
+    assert.throws(
+      () => guard.assertPatch(symlinkPatch("crafted-link", "escape/../secret.txt")),
+      /symlink target escapes cwd/,
+    );
+    assert.equal(existsSync(path.join(root, "crafted-link")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("treats backslash as a literal path character on POSIX", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-backslash-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "adapter-backslash-out-"));
+  try {
+    const name = "escape\\outside";
+    symlinkSync(outside, path.join(root, name), "dir");
+    const guard = new WorkspaceGuard(root);
+    assert.throws(() => guard.assertPath(`${name}/new.txt`, true), /path escapes cwd through symlink/);
+    assert.throws(() => guard.assertPatch(symlinkPatch("link", `${name}/secret.txt`)), /symlink target escapes cwd/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("rejects symlink escapes through chains longer than 32 hops and rejects cycles", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-link-chain-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "adapter-link-chain-out-"));
+  try {
+    initGit(root);
+    writeFileSync(path.join(root, "keep.txt"), "keep\n");
+    writeFileSync(path.join(outside, "secret.txt"), "secret\n");
+    git(root, ["add", "keep.txt"]);
+    git(root, ["commit", "-q", "-m", "base"]);
+
+    for (let i = 0; i < 40; i++) {
+      symlinkSync(`chain${i + 1}`, path.join(root, `chain${i}`));
+    }
+    symlinkSync(outside, path.join(root, "chain40"), "dir");
+
+    const guard = new WorkspaceGuard(root);
+    assert.throws(
+      () => guard.assertPatch(symlinkPatch("long-link", "chain0/secret.txt")),
+      /symlink target escapes cwd/,
+    );
+
+    symlinkSync("cycle-b", path.join(root, "cycle-a"));
+    symlinkSync("cycle-a", path.join(root, "cycle-b"));
+    assert.throws(
+      () => guard.assertPatch(symlinkPatch("cycle-link", "cycle-a/never.txt")),
+      /symlink cycle/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("fails closed on expanding symlink cycles", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-expanding-cycle-"));
+  try {
+    symlinkSync("a/x", path.join(root, "a"));
+    const guard = new WorkspaceGuard(root);
+    assert.throws(() => guard.assertPath("a/file", true), /symlink cycle|excessive indirection/);
+    assert.throws(() => guard.assertPatch(symlinkPatch("link", "a/file")), /symlink cycle|excessive indirection/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("decodes Git octal pathname escapes as UTF-8 bytes", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-utf8-rename-"));
+  try {
+    initGit(root);
+    writeFileSync(path.join(root, "café.txt"), "coffee\n");
+    git(root, ["add", "."]);
+    git(root, ["commit", "-q", "-m", "base"]);
+
+    git(root, ["mv", "café.txt", "renamed.txt"]);
+    const patch = git(root, ["diff", "--cached"]).stdout;
+    git(root, ["reset", "--hard", "-q"]);
+
+    assert.match(patch, /caf\\303\\251\.txt/);
+    const guard = new WorkspaceGuard(root);
+    assert.deepEqual(guard.parseRenameSources(patch), ["café.txt"]);
+
+    const allowed = new WorkspaceGuard(root, ["café.txt", "renamed.txt"]);
+    assert.deepEqual(allowed.assertPatch(patch), ["renamed.txt"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
