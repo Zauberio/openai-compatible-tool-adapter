@@ -197,7 +197,7 @@ Example write allowlist:
 export OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES="src/index.ts,test/index.test.ts"
 ```
 
-This allowlist applies to `write_file`, `replace_in_file` and every path detected in `apply_patch`. It does **not** restrict `run_command`.
+This allowlist applies to `write_file`, `replace_in_file` and every path detected in `apply_patch`. Rename/copy patches require both the source (`rename from` / `copy from`) and destination to be allowlisted; allowing only the destination is rejected. Binary mode-`120000` symlink patches are rejected because their target cannot be safely pre-scanned. It does **not** restrict `run_command`.
 
 See [docs/provider-compatibility.md](./docs/provider-compatibility.md) for endpoint requirements and compatibility diagnostics.
 
