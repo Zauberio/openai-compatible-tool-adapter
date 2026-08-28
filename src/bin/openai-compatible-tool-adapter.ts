@@ -92,6 +92,7 @@ const extraHeaders = jsonObjectEnv("OPENAI_COMPATIBLE_ADAPTER_HEADERS_JSON");
 const maxTurns = numberEnvZeroMeansUnlimited("OPENAI_COMPATIBLE_ADAPTER_MAX_TURNS", 20);
 const maxRetries = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_RETRIES", 3);
 const readLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LIMIT", 200000);
+const maxPromptBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_PROMPT_BYTES", 2 * 1024 * 1024);
 const commandTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_TIMEOUT_MS", 120000);
 const requestTimeoutMs = numberEnv("OPENAI_COMPATIBLE_ADAPTER_REQUEST_TIMEOUT_MS", 600000);
 const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
@@ -178,8 +179,27 @@ const tools = [
 const allowedToolNames = tools.map((toolEntry) => toolEntry.function.name);
 const observedEvidence: string[] = [];
 
+
+function readStdinBounded(maxBytes: number): string {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const buf = Buffer.alloc(64 * 1024);
+  for (;;) {
+    const n = fs.readSync(0, buf, 0, buf.length, null);
+    if (n === 0) break;
+    total += n;
+    if (total > maxBytes) {
+      throw new Error(
+        `stdin prompt exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_PROMPT_BYTES (${maxBytes})`,
+      );
+    }
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function main() {
-  const rawPrompt = fs.readFileSync(0, "utf8");
+  const rawPrompt = readStdinBounded(maxPromptBytes);
   const prompt = recipe.preparePrompt(rawPrompt, cwd);
   const schemaInstruction = outputSchema
     ? `The final answer must be valid JSON matching the requested output schema path: ${outputSchema}. Do not wrap JSON in markdown.`
