@@ -36,7 +36,10 @@ When `OPENAI_COMPATIBLE_ADAPTER_ALLOWED_FILES` is non-empty, it applies to:
 
 - `write_file`;
 - `replace_in_file`;
-- every file reported by `git apply --numstat` for `apply_patch`.
+- every file reported by `git apply --numstat` for `apply_patch`;
+- both source and destination paths for rename/copy patch records.
+
+Rename/copy of an existing symlink is validated using the source symlink target at the destination location, so relocating a relative symlink cannot turn an in-workspace target into an outside-workspace target. Binary mode-`120000` symlink patches are rejected because their target cannot be safely pre-scanned.
 
 The allowlist contains exact relative paths. It is not a directory-prefix matcher.
 

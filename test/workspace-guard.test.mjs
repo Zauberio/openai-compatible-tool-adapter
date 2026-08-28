@@ -119,6 +119,32 @@ test("rejects unlisted rename and copy sources in apply_patch", () => {
   }
 });
 
+test("rejects similarity-only symlink relocation that escapes at the destination", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "adapter-symlink-relocate-"));
+  try {
+    initGit(root);
+    mkdirSync(path.join(root, "a", "b"), { recursive: true });
+    mkdirSync(path.join(root, "inside"));
+    writeFileSync(path.join(root, "inside", "secret.txt"), "secret\n");
+    symlinkSync("../../inside", path.join(root, "a", "b", "link"));
+    git(root, ["add", "."]);
+    git(root, ["commit", "-q", "-m", "base"]);
+
+    git(root, ["mv", "a/b/link", "link"]);
+    const patch = git(root, ["diff", "--cached", "--find-renames"]).stdout;
+    git(root, ["reset", "--hard", "-q"]);
+
+    assert.match(patch, /similarity index 100%/);
+    assert.match(patch, /rename from a\/b\/link/);
+    const guard = new WorkspaceGuard(root);
+    assert.throws(() => guard.assertPatch(patch), /symlink target escapes cwd/);
+    assert.equal(existsSync(path.join(root, "a", "b", "link")), true);
+    assert.equal(existsSync(path.join(root, "link")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("preserves trailing spaces and decodes C-quoted rename sources", () => {
   const root = mkdtempSync(path.join(tmpdir(), "adapter-quote-"));
   try {

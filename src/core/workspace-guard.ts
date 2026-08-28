@@ -68,8 +68,14 @@ export class WorkspaceGuard {
     // so the SOURCE path is never validated against the allowlist - a rename
     // could silently delete/overwrite an unlisted file. Parse the patch text
     // for rename/copy sources and check them too.
-    for (const src of this.parseRenameSources(patch)) {
-      this.assertPath(src, true);
+    const renamePairs = this.parseRenamePairs(patch);
+    for (const { source, destination } of renamePairs) {
+      this.assertPath(source, true);
+      const sourceAbs = path.resolve(this.cwd, source);
+      const sourceStat = lstatIfPresent(sourceAbs);
+      if (sourceStat?.isSymbolicLink()) {
+        this.assertSymlinkTarget(fs.readlinkSync(sourceAbs), destination);
+      }
     }
     // Symlink creation or retarget (mode 120000): the numstat scan cannot
     // see through a symlink that does not exist yet, so write-through
@@ -244,15 +250,28 @@ export class WorkspaceGuard {
   // "rename from <path>" / "copy from <path>" lines carry the pre-image path
   // that numstat hides for rename/copy records. Keep trailing spaces and
   // decode C-quoted Git pathnames so allowlist checks see the real source.
-  parseRenameSources(patch: string): string[] {
-    const sources: string[] = [];
-    const re = /^(?:rename|copy) from (.*)$/gm;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(patch)) !== null) {
-      const src = decodeGitPath(m[1]);
-      if (src && src !== "/dev/null") sources.push(src);
+  parseRenamePairs(patch: string): { source: string; destination: string }[] {
+    const pairs: { source: string; destination: string }[] = [];
+    let source = "";
+    for (const raw of patch.split("\n")) {
+      const line = stripCr(raw);
+      if (line.startsWith("rename from ") || line.startsWith("copy from ")) {
+        source = decodeGitPath(line.slice(line.indexOf(" from ") + 6));
+        continue;
+      }
+      if ((line.startsWith("rename to ") || line.startsWith("copy to ")) && source) {
+        const destination = decodeGitPath(line.slice(line.indexOf(" to ") + 4));
+        if (source !== "/dev/null" && destination && destination !== "/dev/null") {
+          pairs.push({ source, destination });
+        }
+        source = "";
+      }
     }
-    return sources;
+    return pairs;
+  }
+
+  parseRenameSources(patch: string): string[] {
+    return this.parseRenamePairs(patch).map(({ source }) => source);
   }
 
   private resolveRealTarget(abs: string, write: boolean): string {
