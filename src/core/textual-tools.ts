@@ -39,7 +39,25 @@ export function normalizeToolCalls(calls: ToolCall[], allowedTools: readonly str
   // Defensive contract guard: the function is exported and callers filter
   // through Array.isArray, but a non-array input must never crash.
   if (!Array.isArray(calls)) return [];
-  return calls.map((call, index) => normalizeToolCall(call, index, allowedTools)).filter(Boolean) as ToolCall[];
+  const seen = new Set<string>();
+  const out: ToolCall[] = [];
+  for (let index = 0; index < calls.length; index += 1) {
+    const normalized = normalizeToolCall(calls[index], index, allowedTools);
+    if (!normalized) continue;
+    // A single assistant message can carry the same call twice: once as a
+    // native tool_call and once as a JSON/DSML block in the content (the
+    // concat in the bin feeds both channels in). Only the content-channel
+    // echo is deduped: a pseudo call whose (name, normalized arguments) key
+    // was already queued is dropped so side effects do not run twice. Native
+    // tool_calls are distinct requests even with identical arguments, so two
+    // same-arg native calls both survive (and seed the set so their echoes
+    // collapse against them).
+    const key = `${normalized.function.name}\u0000${normalized.function.arguments}`;
+    if (normalized.id.startsWith("pseudo-") && seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
 }
 
 function normalizeToolCall(call: ToolCall, index: number, allowedTools: readonly string[]): ToolCall | null {
