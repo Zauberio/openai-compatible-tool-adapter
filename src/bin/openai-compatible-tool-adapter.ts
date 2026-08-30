@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
 import { compileJsonSchema } from "../core/schema-validator.js";
@@ -98,6 +98,7 @@ const maxTokens = numberEnvAllowZero("OPENAI_COMPATIBLE_ADAPTER_MAX_TOKENS", 0);
 const maxWriteBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_WRITE_BYTES", 2 * 1024 * 1024);
 const maxPatchBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_PATCH_BYTES", 2 * 1024 * 1024);
 const commandOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_COMMAND_OUTPUT_LIMIT", 200000);
+const maxReplaceBytes = numberEnv("OPENAI_COMPATIBLE_ADAPTER_MAX_REPLACE_BYTES", 4 * 1024 * 1024);
 const diffOutputLimit = numberEnv("OPENAI_COMPATIBLE_ADAPTER_DIFF_OUTPUT_LIMIT", 200000);
 const recipe = loadRecipe(process.env.OPENAI_COMPATIBLE_ADAPTER_RECIPE || "generic", {
   env: process.env,
@@ -256,7 +257,7 @@ async function main() {
     }
     for (const call of calls) {
       process.stdout.write(`tool_call: ${call.function.name} ${call.function.arguments || "{}"}\n`);
-      const result = executeTool(call);
+      const result = await executeTool(call);
       toolsExecuted += 1;
       recordObservedEvidence(call, result);
       process.stdout.write(`tool_result: ${truncate(result.content, 2000)}\n`);
@@ -519,7 +520,138 @@ function recordObservedEvidence(call: ToolCall, result: Message) {
   if (text && !observedEvidence.includes(text)) observedEvidence.push(text.slice(0, 500));
 }
 
-function executeTool(call: ToolCall): Message {
+function runCommand(command: string, cwd: string, timeout: number): Promise<{
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  binaryOutput: boolean;
+  error?: string;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      detached: true, // own process group so the whole tree can be terminated
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // Grace period between SIGTERM and the SIGKILL escalation on timeout.
+    const killGraceMs = 150;
+    // Match main's run_command raw-capture floor (#9): a 1 MiB cap can fill
+    // the pipe and stall the child. Returned text is still truncated separately.
+    const maxBuffer = Math.max(16 * 1024 * 1024, commandOutputLimit + 1024 * 1024);
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let overflow = false;
+    let settled = false;
+
+    const decoded = () => {
+      const stdout = decodeSpawnOutput(Buffer.concat(stdoutChunks));
+      const stderr = decodeSpawnOutput(Buffer.concat(stderrChunks));
+      return {
+        stdout: stdout.text,
+        stderr: stderr.text,
+        binaryOutput: stdout.lossy || stderr.lossy,
+      };
+    };
+
+    const finish = (value: {
+      status: number | null;
+      signal: NodeJS.Signals | null;
+      timedOut: boolean;
+      stdout?: string;
+      stderr?: string;
+      binaryOutput?: boolean;
+      error?: string;
+    }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const out = decoded();
+      resolve({
+        status: value.status,
+        signal: value.signal,
+        timedOut: value.timedOut,
+        stdout: out.stdout,
+        stderr: out.stderr,
+        binaryOutput: out.binaryOutput,
+        error: value.error,
+      });
+    };
+
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // process group already gone
+      }
+    };
+
+    const onChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      if (settled || overflow) return;
+      const next = (stream === "stdout" ? stdoutBytes : stderrBytes) + chunk.length;
+      if (next > maxBuffer) {
+        overflow = true;
+        killGroup("SIGKILL");
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish({
+          status: null,
+          signal: "SIGKILL",
+          timedOut: false,
+          error: "command output exceeded raw capture floor",
+        });
+        return;
+      }
+      if (stream === "stdout") {
+        stdoutChunks.push(chunk);
+        stdoutBytes = next;
+      } else {
+        stderrChunks.push(chunk);
+        stderrBytes = next;
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => onChunk("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => onChunk("stderr", chunk));
+    child.on("error", (error) => {
+      finish({ status: null, signal: null, timedOut, error: String(error.message || error) });
+    });
+    child.on("close", (code, signal) => {
+      // Reap survivors of the process group only when the command did NOT
+      // succeed: a successful command may have spawned a background
+      // helper/server with redirected output that must be allowed to outlive
+      // the adapter. Timeouts and failures still kill the whole group.
+      if (timedOut || code !== 0 || signal !== null) killGroup("SIGKILL");
+      finish({ status: code, signal, timedOut });
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Escalate SIGTERM -> SIGKILL to the whole process group after a short
+      // grace period, and resolve the command independently of the close
+      // handler: a descendant that ignores SIGTERM or holds stdout/stderr
+      // open must not be able to outlive the command.
+      killGroup("SIGTERM");
+      setTimeout(() => {
+        killGroup("SIGKILL");
+        finish({ status: null, signal: "SIGKILL", timedOut: true });
+        // Release the child handle and the piped streams after the escalation.
+        // A setsid'd grandchild can survive the group SIGKILL and keep the
+        // inherited stdout/stderr pipes open, which would otherwise keep the
+        // event loop alive and hang the process even though the promise
+        // already resolved.
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+      }, killGraceMs);
+    }, timeout);
+  });
+}
+
+async function executeTool(call: ToolCall): Promise<Message> {
   let parsed: any = {};
   try {
     parsed = JSON.parse(call.function.arguments || "{}");
@@ -565,6 +697,15 @@ function executeTool(call: ToolCall): Message {
       const replacement = String(parsed.replacement ?? "");
       const replaceAll = parsed.replaceAll === true;
       if (!search) return toolResult(call.id, { ok: false, error: "missing search" });
+      const st = fs.statSync(abs);
+      if (st.size > maxReplaceBytes) {
+        return toolResult(call.id, {
+          ok: false,
+          path: rel,
+          error: `file exceeds OPENAI_COMPATIBLE_ADAPTER_MAX_REPLACE_BYTES (${maxReplaceBytes}); refuse full-file load for replace_in_file`,
+          bytes: st.size,
+        });
+      }
       const before = fs.readFileSync(abs, "utf8");
       const occurrences = before.split(search).length - 1;
       if (occurrences === 0)
@@ -602,33 +743,18 @@ function executeTool(call: ToolCall): Message {
       if (!command) return toolResult(call.id, { ok: false, error: "missing command" });
       command = recipe.rewriteCommand?.(command) ?? command;
       const timeout = boundedCommandTimeout(parsed.timeoutMs, commandTimeoutMs);
-      // Capture raw bytes. spawnSync({ encoding: "utf8" }) inserts U+FFFD for
-      // invalid sequences, which cannot be distinguished from a literal
-      // U+FFFD already present in valid UTF-8.
-      const result = spawnSync("bash", ["-lc", command], {
-        cwd,
-        timeout,
-        // Raw read cap must exceed COMMAND_OUTPUT_LIMIT (default 200KB):
-        // a smaller cap KILLS the command mid-run (SIGTERM/ENOBUFS) when its
-        // output exceeds it, and the tool then reports ok:false even though
-        // the command only died because of the capture buffer. 16MB keeps
-        // realistic builds/tests alive; the returned text is still truncated
-        // by commandOutputLimit below. ENOBUFS beyond 16MB stays ok:false -
-        // the command genuinely did not complete.
-        maxBuffer: Math.max(16 * 1024 * 1024, commandOutputLimit + 1024 * 1024),
-      });
-      const stdout = decodeSpawnOutput(result.stdout);
-      const stderr = decodeSpawnOutput(result.stderr);
-      // This flag means UTF-8 decode was lossy, not that the stream is a
+      const result = await runCommand(command, cwd, timeout);
+      if (result.error) return toolResult(call.id, { ok: false, error: result.error });
+      // binaryOutput means UTF-8 decode was lossy, not that the stream is a
       // binary file. Valid UTF-8 (including a literal U+FFFD) is not flagged.
-      const binaryOutput = stdout.lossy || stderr.lossy;
       return toolResult(call.id, {
         ok: result.status === 0,
         status: result.status,
         signal: result.signal,
-        stdout: truncate(stdout.text, commandOutputLimit),
-        stderr: truncate(stderr.text, commandOutputLimit),
-        ...(binaryOutput ? { binaryOutput: true, note: "output contained non-UTF-8 bytes; text above is lossy" } : {}),
+        timedOut: result.timedOut,
+        stdout: truncate(result.stdout, commandOutputLimit),
+        stderr: truncate(result.stderr, commandOutputLimit),
+        ...(result.binaryOutput ? { binaryOutput: true, note: "output contained non-UTF-8 bytes; text above is lossy" } : {}),
       });
     }
     if (call.function.name === "search_files") {
@@ -684,12 +810,32 @@ function executeTool(call: ToolCall): Message {
       });
     }
     if (call.function.name === "git_diff") {
-      const status = spawnSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
+      const gitTimeout = Math.min(commandTimeoutMs, 30000);
+      const status = spawnSync("git", ["status", "--short"], {
+        cwd,
+        encoding: "utf8",
+        timeout: gitTimeout,
+        maxBuffer: 1024 * 1024,
+      });
       const diff = spawnSync("git", ["diff", "--", "."], {
         cwd,
         encoding: "utf8",
+        timeout: gitTimeout,
         maxBuffer: 2 * 1024 * 1024,
       });
+      const diffErr = diff.error as (NodeJS.ErrnoException | undefined);
+      const diffEnobufs = Boolean(diffErr && diffErr.code === "ENOBUFS");
+      // ENOBUFS: the diff exceeded maxBuffer. Return the captured (partial)
+      // output and let diffOutputLimit truncate it, instead of failing the call.
+      if (status.error || (diff.error && !diffEnobufs)) {
+        const err = status.error || diff.error;
+        const timedOut = Boolean(err && (err as NodeJS.ErrnoException).code === "ETIMEDOUT");
+        return toolResult(call.id, {
+          ok: false,
+          error: timedOut ? "git_diff timed out" : String(err),
+          timedOut,
+        });
+      }
       return toolResult(call.id, {
         ok: true,
         status: status.stdout,
@@ -718,12 +864,56 @@ function lineRange(parsed: Record<string, unknown>): { start: number; end: numbe
 
 function defaultReadLineEnd(abs: string): number {
   const maxLines = numberEnv("OPENAI_COMPATIBLE_ADAPTER_READ_LINES", 1000);
-  const lineCount = fs.readFileSync(abs, "utf8").split(/\n/).length;
-  return Math.min(lineCount, maxLines);
+  const { lines } = readLinesBounded(abs, 1, maxLines);
+  return Math.min(lines.length, maxLines);
+}
+
+function readLinesBounded(abs: string, start: number, end: number, maxBytes = 4 * 1024 * 1024): {
+  lines: string[];
+  totalLines: number;
+  scanTruncated: boolean;
+  partialLine: boolean;
+} {
+  const fd = fs.openSync(abs, "r");
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size > maxBytes) {
+      // Avoid loading huge files into memory: read a bounded head window.
+      // The window must cover the requested range, otherwise the caller reports an error.
+      const buffer = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+      const content = buffer.toString("utf8", 0, bytesRead);
+      // The window may end in the middle of a long line; that trailing
+      // fragment is not a complete line and must never be served as one.
+      const partialLine = !content.endsWith("\n");
+      const lines = content.split("\n");
+      if (partialLine) lines.pop();
+      return { lines, totalLines: lines.length, scanTruncated: true, partialLine };
+    }
+    const content = fs.readFileSync(abs, "utf8");
+    const lines = content.split("\n");
+    // A trailing newline yields a final empty element in split(); drop it so
+    // totalLines counts real lines (and read_file does not render a phantom
+    // empty trailing line). Preserve empty-file and non-newline-terminated.
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    return { lines, totalLines: lines.length, scanTruncated: false, partialLine: false };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function readFileRange(id: string, rel: string, abs: string, start: number, end: number): Message {
-  const lines = fs.readFileSync(abs, "utf8").split(/\n/);
+  const { lines, totalLines, scanTruncated, partialLine } = readLinesBounded(abs, start, end);
+  if (scanTruncated && end > lines.length) {
+    const error = partialLine
+      ? `the readable window ends inside line ${lines.length + 1} (the window boundary cut a long line, so its fragment cannot be served); use read_file_range with an end line <= ${lines.length} or a narrower window`
+      : `file is too large to read the requested range (${end} > ${lines.length} lines in the readable window); use a smaller end line or read_file with a smaller range`;
+    return toolResult(id, {
+      ok: false,
+      path: rel,
+      error,
+    });
+  }
   const boundedEnd = Math.min(Math.max(start, end), lines.length);
   const content = lines
     .slice(start - 1, boundedEnd)
@@ -734,9 +924,9 @@ function readFileRange(id: string, rel: string, abs: string, start: number, end:
     path: rel,
     start,
     end: boundedEnd,
-    total_lines: lines.length,
+    total_lines: scanTruncated ? null : totalLines,
     truncated_before: start > 1,
-    truncated_after: boundedEnd < lines.length,
+    truncated_after: boundedEnd < totalLines,
     content: truncate(content, readLimit),
   });
 }
