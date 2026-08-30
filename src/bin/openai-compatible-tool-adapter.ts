@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
 import { compileJsonSchema } from "../core/schema-validator.js";
+import { searchFiles } from "../core/search-files.js";
 import { WorkspaceGuard } from "../core/workspace-guard.js";
 
 type Message = {
@@ -636,23 +637,14 @@ function executeTool(call: ToolCall): Message {
       const maxResults = Math.max(1, Math.min(Number(parsed.maxResults || 50), 200));
       const pattern = String(parsed.pattern || "");
       if (!pattern.trim()) return toolResult(call.id, { ok: false, error: "missing pattern" });
-      const result = spawnSync("grep", ["-RIn", "--exclude-dir=.git", "--", pattern, relPath], {
-        cwd,
-        encoding: "utf8",
-        timeout: Math.min(commandTimeoutMs, 30000),
-        maxBuffer: 1024 * 1024,
-      });
-      const lines = String(result.stdout || "")
-        .split(/\n/)
-        .filter(Boolean)
-        .slice(0, maxResults);
+      const result = searchFiles(cwd, relPath, pattern, maxResults, workspace, Math.min(commandTimeoutMs, 30000));
       return toolResult(call.id, {
-        ok: result.status === 0 || result.status === 1,
+        ok: result.ok,
         status: result.status,
         pattern,
         path: relPath,
-        matches: lines,
-        truncated: lines.length >= maxResults,
+        matches: result.matches,
+        truncated: result.truncated,
         stderr: truncate(result.stderr, Math.min(commandOutputLimit, 2000)),
       });
     }
