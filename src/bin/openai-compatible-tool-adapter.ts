@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadRecipe, type RecipeContext } from "../recipes/index.js";
 import { normalizeToolCalls, pseudoToolCalls } from "../core/textual-tools.js";
+import { atomicWriteFileSync } from "../core/atomic-write.js";
 import { compileJsonSchema } from "../core/schema-validator.js";
 import { WorkspaceGuard } from "../core/workspace-guard.js";
 
@@ -552,7 +553,7 @@ function executeTool(call: ToolCall): Message {
         });
       }
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content);
+      atomicWriteFileSync(abs, content);
       return toolResult(call.id, {
         ok: true,
         path: rel,
@@ -588,7 +589,7 @@ function executeTool(call: ToolCall): Message {
           bytes: afterBytes,
         });
       }
-      fs.writeFileSync(abs, after);
+      atomicWriteFileSync(abs, after);
       return toolResult(call.id, {
         ok: true,
         path: rel,
