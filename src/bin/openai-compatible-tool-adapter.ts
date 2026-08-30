@@ -873,15 +873,28 @@ function requiredEnv(name: string): string {
 function numberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return fallback;
-  const value = Number(raw ?? fallback);
-  if (Number.isFinite(value) && value > 0) return value;
+  // Decimal-only: Number("0x10") = 16 and Number("1e2") = 100 are almost
+  // certainly operator typos for decimal values. Safe-integer bound too.
   // Shared contract: warn and keep the default. Fail-fast settings
   // (MAX_TURNS today; MAX_RETRIES if a later change treats 0 as
   // "no retries") must use a dedicated throwing helper instead of
   // changing this fallback. Keep the warning on every invalid path.
-  process.stderr.write(
-    `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid positive number, using default ${fallback}\n`,
-  );
+  const text = String(raw ?? fallback).trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) {
+    if (raw !== undefined) {
+      process.stderr.write(
+        `[openai-compatible-tools] warning: ${name}="${String(raw)}" is not a valid positive number, using default ${fallback}\n`,
+      );
+    }
+    return fallback;
+  }
+  const value = Number(text);
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  if (raw !== undefined) {
+    process.stderr.write(
+      `[openai-compatible-tools] warning: ${name}="${String(raw)}" is not a valid positive number, using default ${fallback}\n`,
+    );
+  }
   return fallback;
 }
 
@@ -907,6 +920,19 @@ function jsonObjectEnv(name: string): Record<string, string> {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${name} must contain a JSON object`);
+  }
+  // JSON.parse silently collapses duplicate keys (last wins) - for header
+  // overrides this can silently remove an auth-related header, so detect
+  // duplicates on the RAW text at top level before parsing collapses them.
+  const seenKeys = new Set<string>();
+  const keyPattern = /"((?:\\.|[^"\\])*)"\s*:/g;
+  let keyMatch: RegExpExecArray | null;
+  while ((keyMatch = keyPattern.exec(raw)) !== null) {
+    const key = keyMatch[1];
+    if (seenKeys.has(key)) {
+      throw new Error(`${name} contains duplicate key "${key}"`);
+    }
+    seenKeys.add(key);
   }
   return Object.fromEntries(
     Object.entries(parsed).map(([key, value]) => [key, String(value)]),
@@ -944,12 +970,23 @@ function truthyEnv(name: string): boolean {
 function numberEnvAllowZero(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw !== undefined && raw.trim() === "") return 0;
-  const value = Number(raw ?? fallback);
-  if (Number.isFinite(value) && value >= 0) return value;
   // Same warn-and-fallback contract as numberEnv; 0 remains valid here.
-  process.stderr.write(
-    `[openai-compatible-tools] warning: ${name}="${String(raw ?? "")}" is not a valid non-negative number, using default ${fallback}\n`,
-  );
+  const text = String(raw ?? fallback).trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) {
+    if (raw !== undefined) {
+      process.stderr.write(
+        `[openai-compatible-tools] warning: ${name}="${String(raw)}" is not a valid non-negative number, using default ${fallback}\n`,
+      );
+    }
+    return fallback;
+  }
+  const value = Number(text);
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  if (raw !== undefined) {
+    process.stderr.write(
+      `[openai-compatible-tools] warning: ${name}="${String(raw)}" is not a valid non-negative number, using default ${fallback}\n`,
+    );
+  }
   return fallback;
 }
 
